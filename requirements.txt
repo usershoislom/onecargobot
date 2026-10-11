@@ -1,0 +1,9 @@
+python-telegram-bot[job-queue]==22.8
+gspread==6.2.1
+google-genai==2.29.0
+httpx==0.28.1
+pypdfium2==5.14.0
+pytesseract==0.3.13
+pillow==12.3.0
+pydantic==2.14.0
+tzdata==2026.1

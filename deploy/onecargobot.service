@@ -1,0 +1,15 @@
+[Unit]
+Description=OneCargo Telegram notes bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=onecargo
+WorkingDirectory=/opt/onecargobot
+ExecStart=/opt/onecargobot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
