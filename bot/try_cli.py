@@ -61,6 +61,7 @@ async def run(args) -> None:
     finally:
         await llm.close()
     analysis, warnings = verify(analysis, colleagues, set())
+    pipeline.apply_mentions(analysis, items, colleagues)
 
     if analysis.needs_clarification:
         print("QUESTION:", analysis.clarification_question)

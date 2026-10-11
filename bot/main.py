@@ -209,6 +209,7 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
     if pending is state.pending:
         state.pending = None
     analysis, warnings = verify(analysis, settings.colleagues, pipeline.open_row_numbers(rows))
+    pipeline.apply_mentions(analysis, items, settings.colleagues)
     log.info("intent=%s entries=%d clarify=%s via %s", analysis.intent, len(analysis.entries),
              analysis.needs_clarification, provider)
 

@@ -177,3 +177,17 @@ def test_split_message_keeps_lines():
     chunks = split_message(text, limit=500)
     assert all(len(c) <= 500 for c in chunks)
     assert "\n".join(chunks) == text
+
+
+def test_apply_mentions_adds_every_tagged_person():
+    team = [Colleague("Anna Cruz", "anna_acc", "Accounting"), Colleague("Sam Lee", "sam_safety", "Safety")]
+    items = [Item(kind="text", text="New contract for John @anna_acc @kate_acc @sam_safety"),
+             Item(kind="text", header="[Forwarded from Broker] ", text="ping @broker_guy")]
+    a = Analysis(intent="log", entries=[
+        Entry(action="Update rates", problem="p", status="Action", assigned_to="Anna Cruz"),
+        Entry(action="Contract details", problem="p", status="Note"),
+    ])
+    pipeline.apply_mentions(a, items, team)
+    assert a.entries[0].assigned_to == "Anna Cruz, @kate_acc, Sam Lee"
+    assert a.entries[1].assigned_to is None  # notes aren't assigned
+    assert pipeline.mentions(items) == ["@anna_acc", "@kate_acc", "@sam_safety"]

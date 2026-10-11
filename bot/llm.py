@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import logging
+import time
 
 import httpx
 from google import genai
@@ -28,7 +29,12 @@ from .schema import Analysis
 log = logging.getLogger(__name__)
 
 GROQ_BASE = "https://api.groq.com/openai/v1"
-RETRYABLE_CODES = {404, 429, 500, 502, 503, 504}
+# 402 = prepaid credits used up, 403 = key not allowed for this model; both mean "try the next one".
+RETRYABLE_CODES = {402, 403, 404, 429, 500, 502, 503, 504}
+# After every Gemini model failed, skip Gemini for a while instead of re-trying it on each message.
+GEMINI_COOLDOWN_SECONDS = {402: 3600, 403: 3600, 429: 600}
+# The fallback has ~8K tokens/minute on Groq's free plan, so it gets a trimmed context.
+FALLBACK_RECENT_ROWS = 40
 # Larger files go through Gemini's Files API instead of inline bytes (request size limit).
 INLINE_LIMIT_BYTES = 14 * 1024 * 1024
 
@@ -46,6 +52,7 @@ class LLM:
         self.cfg = cfg
         self.gemini = genai.Client(api_key=cfg.gemini_api_key)
         self.http = httpx.AsyncClient(timeout=120)
+        self.gemini_down_until = 0.0
 
     # ------------------------------------------------------------ public
 
@@ -53,12 +60,13 @@ class LLM:
         """Return (analysis, provider label)."""
         system = load_prompt("extract_system.md") + "\n\n" + load_prompt("playbooks.md")
         parts: list[types.Part] = [types.Part.from_text(text=context)]
-        for n, item in enumerate(items, 1):
-            if item.kind == "text":
-                parts.append(types.Part.from_text(text=f"--- item {n} ---\n{item.header}{item.text}"))
-            else:
-                parts.append(types.Part.from_text(text=f"--- item {n}: {item.kind} {item.filename or ''} ---\n{item.header}"))
-                parts.append(await self._file_part(item))
+        if not self._gemini_cooling_down():
+            for n, item in enumerate(items, 1):
+                if item.kind == "text":
+                    parts.append(types.Part.from_text(text=f"--- item {n} ---\n{item.header}{item.text}"))
+                else:
+                    parts.append(types.Part.from_text(text=f"--- item {n}: {item.kind} {item.filename or ''} ---\n{item.header}"))
+                    parts.append(await self._file_part(item))
 
         config = types.GenerateContentConfig(
             system_instruction=system,
@@ -74,7 +82,7 @@ class LLM:
             if not self.cfg.groq_api_key:
                 raise
             log.warning("Gemini unavailable (%s); using Groq fallback", exc)
-            return await self._groq_analyze(items, context, system), f"groq:{self.cfg.groq_text_model}"
+            return await self._groq_analyze(items, context), f"groq:{self.cfg.groq_text_model}"
 
     async def answer(self, question_context: str) -> str:
         system = load_prompt("answer_system.md")
@@ -105,8 +113,14 @@ class LLM:
             uploaded = await self.gemini.aio.files.get(name=uploaded.name)
         return types.Part.from_uri(file_uri=uploaded.uri, mime_type=item.mime)
 
+    def _gemini_cooling_down(self) -> bool:
+        return time.monotonic() < self.gemini_down_until
+
     async def _gemini(self, parts: list[types.Part], config: types.GenerateContentConfig):
+        if self._gemini_cooling_down():
+            raise LLMUnavailable("Gemini skipped (cooling down after recent failures)")
         last_error: Exception | None = None
+        codes: set[int] = set()
         for model in self.cfg.gemini_models:
             try:
                 resp = await self.gemini.aio.models.generate_content(
@@ -115,19 +129,26 @@ class LLM:
                 return resp, model
             except genai_errors.APIError as exc:
                 if exc.code in RETRYABLE_CODES:
-                    log.warning("Gemini model %s failed with %s, trying next", model, exc.code)
+                    log.warning("Gemini model %s failed with %s %s, trying next", model, exc.code, exc.message)
                     last_error = exc
+                    codes.add(exc.code)
                     continue
                 raise
             except httpx.TransportError as exc:
                 log.warning("Gemini model %s network error: %s", model, exc)
                 last_error = exc
+        cooldown = max((GEMINI_COOLDOWN_SECONDS.get(c, 0) for c in codes), default=0)
+        if cooldown:
+            self.gemini_down_until = time.monotonic() + cooldown
+            log.warning("All Gemini models failed (%s); skipping Gemini for %d min", sorted(codes), cooldown // 60)
         raise LLMUnavailable(str(last_error))
 
     # ------------------------------------------------------------ groq fallback
 
-    async def _groq_analyze(self, items: list[Item], context: str, system: str) -> Analysis:
-        chunks = [context]
+    async def _groq_analyze(self, items: list[Item], context: str) -> Analysis:
+        # Main rules only: the playbooks would use most of the backup model's token budget.
+        system = load_prompt("extract_system.md")
+        chunks = [trim_recent_rows(context, FALLBACK_RECENT_ROWS)]
         transcripts = []
         # The fallback model has a small per-minute token budget, so documents share a fixed char budget.
         docs = sum(1 for i in items if i.kind in ("pdf", "image")) or 1
@@ -172,15 +193,25 @@ class LLM:
         body = {
             "model": self.cfg.groq_text_model,
             "temperature": 0.2,
+            "max_completion_tokens": 3000,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
+        if "gpt-oss" in self.cfg.groq_text_model:
+            body["reasoning_effort"] = "low"  # reasoning tokens count against the per-minute budget
         if json_mode:
             body["response_format"] = {"type": "json_object"}
-        r = await self.http.post(
-            f"{GROQ_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {self.cfg.groq_api_key}"},
-            json=body,
-        )
+        for attempt in range(2):
+            r = await self.http.post(
+                f"{GROQ_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {self.cfg.groq_api_key}"},
+                json=body,
+            )
+            wait = float(r.headers.get("retry-after", "0") or 0)
+            if r.status_code == 429 and attempt == 0 and wait <= 30:
+                log.warning("Groq rate limit, retrying in %.0fs", wait)
+                await asyncio.sleep(wait or 5)
+                continue
+            break
         if r.status_code != 200:
             raise LLMUnavailable(f"Groq chat {r.status_code}: {r.text[:200]}")
         return r.json()["choices"][0]["message"]["content"]
@@ -197,3 +228,16 @@ class LLM:
             raise LLMUnavailable(f"Groq transcription {r.status_code}: {r.text[:200]}")
         return r.json().get("text", "").strip()
 
+
+def trim_recent_rows(context: str, keep: int) -> str:
+    """Keep only the last `keep` lines of the RECENT ROWS block in a context string."""
+    lines = context.split("\n")
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith("RECENT ROWS")) + 1
+    except StopIteration:
+        return context
+    end = next((i for i in range(start, len(lines)) if not lines[i].strip()), len(lines))
+    rows = lines[start:end]
+    if len(rows) <= keep:
+        return context
+    return "\n".join(lines[:start] + rows[-keep:] + lines[end:])

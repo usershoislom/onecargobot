@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import html
 import io
+import re
 from datetime import datetime
 
 from .media import Item
-from .schema import Analysis, Colleague, Entry
+from .schema import Analysis, Colleague, Entry, match_colleagues
 from .sheets import HEADERS, LogRow
 
 
@@ -20,6 +21,30 @@ DOC_LABELS = {
     "repair_maintenance": "Repair / maintenance", "load_issue": "Load issue", "payroll_payment": "Payroll / payment",
     "general_note": "Note",
 }
+
+
+_MENTION = re.compile(r"(?<![\w@])@([A-Za-z0-9_]{4,32})")
+
+
+def mentions(items: list[Item]) -> list[str]:
+    """@usernames the owner typed in the batch's own text (not in forwarded messages)."""
+    found: list[str] = []
+    for item in items:
+        if item.kind == "text" and item.text and "[Forwarded from" not in item.header:
+            for m in _MENTION.findall(item.text):
+                if f"@{m}" not in found:
+                    found.append(f"@{m}")
+    return found
+
+
+def apply_mentions(analysis: Analysis, items: list[Item], colleagues: list[Colleague]) -> None:
+    """People the owner @mentions are assignees of every Action/Follow-up row (the AI sometimes drops some)."""
+    tagged = mentions(items)
+    if not tagged:
+        return
+    for e in analysis.entries:
+        if e.status in ("Action", "Follow-up"):
+            e.assigned_to = match_colleagues(", ".join(filter(None, [e.assigned_to, *tagged])), colleagues)
 
 
 def open_row_numbers(rows: list[LogRow]) -> set[int]:
@@ -111,5 +136,5 @@ def saved_reply(analysis: Analysis, row_numbers: list[int], closed: list[int],
         out.append("☑️ Also marked " + ", ".join(f"row {r}" for r in closed) + " as Done")
     out += [f"⚠️ {html.escape(w)}" for w in warnings]
     if provider.startswith("groq:"):
-        out.append("<i>(Gemini's free limit was reached, so the backup AI handled this one.)</i>")
+        out.append("<i>(Gemini was unavailable, so the backup AI handled this one. Double-check the numbers.)</i>")
     return "\n".join(out)

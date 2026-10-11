@@ -41,7 +41,7 @@ class Config:
     timezone: ZoneInfo
     batch_window_seconds: float
     recent_rows_context_limit: int = 300
-    fallback_doc_chars: int = 14000
+    fallback_doc_chars: int = 9000
     ocr_max_pages: int = 20
     log_level: str = "INFO"
 
@@ -64,12 +64,12 @@ def load_config() -> Config:
         gemini_api_key=required("GEMINI_API_KEY"),
         gemini_models=_csv("GEMINI_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.1-flash-lite"),
         groq_api_key=os.environ.get("GROQ_API_KEY", "").strip() or None,
-        groq_text_model=os.environ.get("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
+        groq_text_model=os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"),
         groq_whisper_model=os.environ.get("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
         timezone=ZoneInfo(os.environ.get("TIMEZONE", "America/New_York")),
         batch_window_seconds=float(os.environ.get("BATCH_WINDOW_SECONDS", "4")),
         recent_rows_context_limit=int(os.environ.get("RECENT_ROWS_CONTEXT_LIMIT", "300")),
-        fallback_doc_chars=int(os.environ.get("FALLBACK_DOC_CHARS", "14000")),
+        fallback_doc_chars=int(os.environ.get("FALLBACK_DOC_CHARS", "9000")),
         ocr_max_pages=int(os.environ.get("OCR_MAX_PAGES", "20")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

@@ -159,7 +159,7 @@ anything is written to the sheet. Phone, load, truck and invoice numbers are kep
 | Provider | What's free | Reads | Role here |
 |---|---|---|---|
 | **Google Gemini API**, Flash / Flash-Lite models | Free tier on `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5/3.1-flash-lite`, `gemini-2.5-flash(-lite)`; Pro models need billing | Text, images, PDF, audio, video in one call; native JSON-schema output | **Primary** |
-| **Groq** | Free plan; Whisper large-v3(-turbo) speech-to-text (~2,000 req/day reported), `openai/gpt-oss-120b`, `llama-3.3-70b-versatile` | Text + audio (via Whisper), no vision on free production models, so PDFs and photos are OCR'd locally with Tesseract (free, ~3 s/page). Default `llama-3.3-70b-versatile` (largest free per-minute token budget, ~12K TPM) | **Fallback** |
+| **Groq** | Free plan (checked Oct 2026 with a real key): Whisper large-v3(-turbo) speech-to-text, `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`; each 1,000 req/day, 8K tokens/min (Llama models were removed) | Text + audio (via Whisper), no vision on free production models, so PDFs and photos are OCR'd locally with Tesseract (free, ~3 s/page). Default `openai/gpt-oss-120b`. To fit 8K tokens/min the fallback uses the main rules without playbooks, the last 40 rows and ≤9,000 chars of document text | **Fallback** |
 | OpenRouter `:free` models | 20 req/min; 50 req/day (1,000/day after a one-time $10 top-up) | Varies by model | Not used (low daily cap); could be added as a 2nd fallback |
 
 Exact free-tier rate limits change often and aren't published per model on
