@@ -95,8 +95,15 @@ sudo chmod 600 /opt/onecargobot/service_account.json /opt/onecargobot/.env
 
 ```bash
 sudo -u onecargo .venv/bin/python -m bot.main     # Ctrl+C after you get the ID
-sudo -u onecargo nano .env                         # set ALLOWED_USER_ID=<your id>
+sudo -u onecargo nano .env                         # set ADMIN_USER_IDS=<your id>
 ```
+
+   You (the developer) are the admin. Give the owner access from Telegram:
+   `/setowner @their_username` (or their numeric ID). They must send the bot
+   one message so it learns their ID. From then on the daily summaries go to them.
+   Until an owner is set, summaries go to the admin. If someone without access
+   writes to the bot, you get a message with ready-to-tap `/adduser` and
+   `/setowner` commands.
 
 5. Install it as a service so it runs 24/7 and restarts itself:
 

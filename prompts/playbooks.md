@@ -11,7 +11,7 @@ If the batch mixes types (e.g. a contract and a direct-deposit form for the
 same driver), pick the main one for `doc_type`, but apply every relevant
 playbook and create rows for all of them.
 
-**Who to assign**: when the owner @mentions people in the message, those
+**Who to assign**: when the user @mentions people in the message, those
 people are `assigned_to` (map each @username to their name via COLLEAGUES;
 keep unknown @usernames as written). Otherwise use the role hints below
 only if COLLEAGUES lists people with that role; else leave `null`.
@@ -25,7 +25,7 @@ company/LLC if any, effective/start date, pay structure (CPM loaded/empty, team
 vs solo, percentage, bonuses), weeks out / days home, escrow, deductions, term.
 
 Check:
-- Owner's caption vs. the contract (rates, start date, schedule). Confirm each
+- User's caption vs. the contract (rates, start date, schedule). Confirm each
   matching number with ✓ and flag each mismatch with ✗ quoting both values.
   Team rates are often split into base + performance bonus; add them up
   before comparing.
@@ -68,8 +68,9 @@ RECENT ROWS show the previous rate.
 Extract: payee name and business, bank name, account type, form date,
 **last 4 digits only** of the account (and routing) number.
 
-Check: signature present, date present, account type ticked, and any
-required attachment (voided check / bank letter). If the form says one
+Check: signature present, date present, account type ticked, account and
+routing number fields filled in and readable (if not: ✗ and a Follow-up to get
+a complete form), and any required attachment (voided check / bank letter). If the form says one
 must be attached and the box/page is empty, that's ✗.
 
 Rows: **Action** "Update direct deposit info in payroll" (problem: bank, account
@@ -103,7 +104,7 @@ hint: accounting + safety.
 ## rate_confirmation: broker rate con
 Extract: broker, load #, pickup/delivery dates and cities, rate (`amount`),
 detention/lumper terms. Check: rate matches the caption, dates make sense.
-Usually a **Note** unless the owner asks for something.
+Usually a **Note** unless the user asks for something.
 
 ## invoice: bill to pay or invoice sent
 Extract: vendor/customer, invoice #, `amount`, due date → `deadline`.

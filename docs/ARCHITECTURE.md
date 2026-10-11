@@ -66,12 +66,25 @@ without a restart.
 | reminder_times | `09:00, 16:00` | Summary times, US Eastern. Any number of times. Also settable via `/reminders 8:30, 16:00` |
 | reminder_days | `Mon, …, Sun` | Days to send summaries |
 | auto_close_rows | `TRUE` | When you report "paid John $500", also flip the matching open row to Done |
+| owner | (empty) | Owner's Telegram ID and/or @username. Gets the daily summaries. Set with `/setowner` |
+| users | (empty) | Other people allowed to use the bot, comma-separated. Set with `/adduser` / `/removeuser` |
 | last_added_rows | (bot-managed) | Which rows are cyan right now |
 
 Colleagues table on the same tab: **E** name, **F** Telegram @username, **G** role.
 When you @mention people in a caption (`@anna_acc @sam_safety`), the bot
 writes their names into Assigned To. Unknown @usernames are kept as written,
 so add everyone once and they'll show up as real names.
+
+## Who can use it
+
+| Role | How | Can |
+|---|---|---|
+| Admin (developer) | `ADMIN_USER_IDS` in `.env` | Everything, plus `/adduser`, `/removeuser`, `/setowner`, `/users` |
+| Owner | `/setowner @username` (stored in Settings) | Send notes, ask questions; **receives the 9 AM / 4 PM summaries** |
+| User | `/adduser @username` (stored in Settings) | Send notes, ask questions |
+
+Everyone else gets "private bot" and the admin is notified. Pending questions
+and Undo are tracked per chat, so the owner and the developer don't interfere.
 
 ## Message handling rules
 

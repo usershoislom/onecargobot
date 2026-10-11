@@ -50,7 +50,8 @@ def load_prompt(name: str) -> str:
 class LLM:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.gemini = genai.Client(api_key=cfg.gemini_api_key)
+        # Without a timeout a stuck request would block the bot; 90 s is plenty for an 18-page PDF.
+        self.gemini = genai.Client(api_key=cfg.gemini_api_key, http_options=types.HttpOptions(timeout=90_000))
         self.http = httpx.AsyncClient(timeout=120)
         self.gemini_down_until = 0.0
 

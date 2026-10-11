@@ -11,7 +11,7 @@ or a mix. It works out what you mean, checks it, and adds rows to your sheet:
 - When something is unclear, it **asks you** before saving.
 - When you report something finished, it logs a new Done row and closes the
   matching open item.
-- It sends a **follow-up summary** at 9 AM and 4 PM Eastern (change the times with
+- It sends the owner a **follow-up summary** at 9 AM and 4 PM Eastern (change the times with
   `/reminders` or in the Settings tab): overdue, due today, due tomorrow, open items.
 - Ask it questions: *"what's overdue for Bob?"*, *"how much do I owe Mike?"*
 - Runs on free tiers: Google Gemini Flash (AI), Groq (backup), Google Cloud's always-free VM.
@@ -22,4 +22,5 @@ or a mix. It works out what you mean, checks it, and adds rows to your sheet:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works, sheet layout, free-AI comparison
 - [prompts/extract_system.md](prompts/extract_system.md): the AI instructions (edit to tune behavior)
 
-**Commands:** `/today` · `/reminders [times]` · `/colleagues` · `/undo` · `/cancel` · `/help`
+**Commands:** `/today` · `/reminders [times]` · `/colleagues` · `/undo` · `/cancel` · `/whoami` · `/help`
+**Admin:** `/users` · `/adduser` · `/removeuser` · `/setowner`. The owner gets the daily summaries.

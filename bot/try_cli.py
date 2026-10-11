@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import mimetypes
 import os
 import re
@@ -66,7 +67,7 @@ async def run(args) -> None:
     if analysis.needs_clarification:
         print("QUESTION:", analysis.clarification_question)
     text = pipeline.saved_reply(analysis, [], [], warnings, provider)
-    print(re.sub(r"</?[bi]>", "", text).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+    print(html.unescape(re.sub(r"</?[bi]>", "", text)))
     print(f"\n--- raw JSON ({provider}) ---")
     print(analysis.model_dump_json(indent=2))
 

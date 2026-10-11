@@ -30,7 +30,7 @@ def _csv(name: str, default: str) -> list[str]:
 @dataclass(frozen=True)
 class Config:
     telegram_token: str
-    allowed_user_id: int | None
+    admin_user_ids: list[int]
     spreadsheet_id: str
     google_credentials_file: str
     gemini_api_key: str
@@ -55,14 +55,15 @@ def load_config() -> Config:
             raise SystemExit(f"Missing required environment variable: {name} (see .env.example)")
         return value
 
-    allowed = os.environ.get("ALLOWED_USER_ID", "").strip()
+    # ALLOWED_USER_ID is the old name; it still works and counts as an admin.
+    admins = _csv("ADMIN_USER_IDS", "") + _csv("ALLOWED_USER_ID", "")
     return Config(
         telegram_token=required("TELEGRAM_BOT_TOKEN"),
-        allowed_user_id=int(allowed) if allowed else None,
+        admin_user_ids=sorted({int(a) for a in admins if a.isdigit()}),
         spreadsheet_id=required("SPREADSHEET_ID"),
         google_credentials_file=os.environ.get("GOOGLE_CREDENTIALS_FILE", str(ROOT / "service_account.json")),
         gemini_api_key=required("GEMINI_API_KEY"),
-        gemini_models=_csv("GEMINI_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.1-flash-lite"),
+        gemini_models=_csv("GEMINI_MODELS", "gemini-3.6-flash,gemini-3.8-flash,gemini-3.1-flash-lite"),
         groq_api_key=os.environ.get("GROQ_API_KEY", "").strip() or None,
         groq_text_model=os.environ.get("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"),
         groq_whisper_model=os.environ.get("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),

@@ -33,6 +33,8 @@ DEFAULT_SETTINGS = [
     ("reminder_times", "09:00, 16:00", "Daily summary times (24h, US Eastern). Comma-separated, any number of times."),
     ("reminder_days", "Mon, Tue, Wed, Thu, Fri, Sat, Sun", "Days to send summaries."),
     ("auto_close_rows", "TRUE", "When you report something done, also set the matching open row to Done."),
+    ("owner", "", "Owner's Telegram ID or @username. Gets the daily summaries. Set with /setowner."),
+    ("users", "", "Other people allowed to use the bot (IDs or @usernames). Set with /adduser."),
     ("last_added_rows", "", "Managed by the bot (rows currently highlighted cyan). Don't edit."),
 ]
 # Colleagues table on the Settings tab: E = name, F = Telegram @username, G = role.

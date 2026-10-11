@@ -20,6 +20,7 @@ from telegram.ext import (
     filters,
 )
 
+from . import access as acl
 from . import digest, pipeline
 from .config import Config, load_config
 from .llm import LLM, LLMUnavailable
@@ -42,12 +43,21 @@ If something is unclear I'll ask before saving.
 /undo: remove the last rows I added
 /cancel: drop the question I'm waiting on
 
-You can also just ask, e.g. "what's overdue for Bob?" or "how much do I owe Mike?\""""
+You can also just ask, e.g. "what's overdue for Bob?" or "how much do I owe Mike?\"
+/whoami: your Telegram ID"""
+
+ADMIN_HELP = """
+
+<b>Admin</b>
+/users: who has access
+/adduser @username or ID: give someone access
+/removeuser @username or ID: take access away
+/setowner @username or ID: the owner gets the daily summaries"""
 
 
 @dataclass
 class Pending:
-    """A batch waiting for the owner to answer a clarifying question."""
+    """A batch waiting for the user to answer a clarifying question."""
     items: list[Item]
     analysis: Analysis
     warnings: list[str]
@@ -62,12 +72,22 @@ class LastSave:
 
 
 @dataclass
-class State:
+class ChatState:
+    """Per-chat state, so the owner and the developer don't step on each other."""
     buffer: list[Item] = field(default_factory=list)
     pending: Pending | None = None
     last_save: LastSave | None = None
+
+
+@dataclass
+class State:
+    access: acl.Access = field(default_factory=acl.Access)
+    chats: dict[int, ChatState] = field(default_factory=dict)
     schedule_key: str = ""
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one sheet writer at a time
+
+    def chat(self, chat_id: int) -> ChatState:
+        return self.chats.setdefault(chat_id, ChatState())
 
 
 # ---------------------------------------------------------------- helpers
@@ -94,20 +114,59 @@ def now_local(cfg: Config) -> datetime:
 
 
 async def authorized(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
-    cfg = cfg_of(ctx)
+    state = state_of(ctx)
     user = update.effective_user
     if user is None:
         return False
-    if cfg.allowed_user_id is None:
+    access = state.access
+    if not access.admins:
         if update.effective_message:
             await update.effective_message.reply_text(
-                f"Your Telegram user ID is {user.id}.\nPut it in ALLOWED_USER_ID in the .env file and restart me."
+                f"Your Telegram user ID is {user.id}.\nPut it in ADMIN_USER_IDS in the .env file and restart me."
             )
         return False
-    if user.id != cfg.allowed_user_id:
-        log.warning("Ignoring message from unauthorized user %s", user.id)
-        return False
-    return True
+    if access.allowed(user.id, user.username):
+        await remember_user_id(ctx, user.id, user.username)
+        return True
+
+    log.warning("Unauthorized user %s (@%s)", user.id, user.username)
+    if update.effective_message and update.effective_chat and update.effective_chat.type == "private":
+        await update.effective_message.reply_text(
+            f"This is a private bot. Ask the admin to add you.\nYour Telegram ID: {user.id}")
+        # Tell the admins once per person, with ready-to-tap commands.
+        notified = ctx.application.bot_data.setdefault("notified_unknown", set())
+        if user.id not in notified:
+            notified.add(user.id)
+            who = html.escape(user.full_name) + (f" (@{html.escape(user.username)})" if user.username else "")
+            for admin in access.admins:
+                await send(ctx, admin, f"🔐 {who} tried to use the bot.\n"
+                                       f"Give access: /adduser {user.id}\nMake owner: /setowner {user.id}")
+    return False
+
+
+async def remember_user_id(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, username: str | None) -> None:
+    """Someone added by @username just wrote: store their numeric ID too (needed for summaries)."""
+    access, sheet = state_of(ctx).access, sheet_of(ctx)
+    owner = acl.with_id(access.owner, user_id, username)
+    users = acl.with_id(access.users, user_id, username)
+    if owner != access.owner:
+        access.owner = owner
+        await asyncio.to_thread(sheet.write_setting, "owner", acl.format_people(owner))
+        await sync_schedule(ctx, force=True)
+    if users != access.users:
+        access.users = users
+        await asyncio.to_thread(sheet.write_setting, "users", acl.format_people(users))
+
+
+async def load_access(ctx_or_app, settings=None) -> None:
+    app = getattr(ctx_or_app, "application", ctx_or_app)
+    cfg: Config = app.bot_data["cfg"]
+    state: State = app.bot_data["state"]
+    if settings is None:
+        settings = await asyncio.to_thread(app.bot_data["sheet"].read_settings)
+    state.access = acl.Access(admins=set(cfg.admin_user_ids),
+                              owner=acl.parse_people(settings.get("owner"))[:1],
+                              users=acl.parse_people(settings.get("users")))
 
 
 def split_message(text: str, limit: int = 3900) -> list[str]:
@@ -160,10 +219,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not items:
         return
 
-    state = state_of(ctx)
-    state.buffer.extend(items)
-    # Wait a few seconds so albums, "text + photo", and multi-forwards arrive as one batch.
     chat_id = msg.chat_id
+    state_of(ctx).chat(chat_id).buffer.extend(items)
+    # Wait a few seconds so albums, "text + photo", and multi-forwards arrive as one batch.
     for job in ctx.job_queue.get_jobs_by_name(f"flush-{chat_id}"):
         job.schedule_removal()
     ctx.job_queue.run_once(flush_job, cfg.batch_window_seconds, chat_id=chat_id, name=f"flush-{chat_id}")
@@ -173,7 +231,8 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def flush_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     state = state_of(ctx)
     chat_id = ctx.job.chat_id
-    items, state.buffer = state.buffer, []
+    chat = state.chat(chat_id)
+    items, chat.buffer = chat.buffer, []
     if not items:
         return
     async with state.lock:
@@ -181,7 +240,7 @@ async def flush_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await process_batch(ctx, chat_id, items)
         except LLMUnavailable as exc:
             log.error("All AI providers unavailable: %s", exc)
-            state.buffer = items + state.buffer  # keep it so the owner can retry by sending anything
+            chat.buffer = items + chat.buffer  # keep it so the user can retry by sending anything
             await send(ctx, chat_id, "⏳ The AI is over its free limit or down right now. I kept your message; "
                                      "send me anything later (even a dot) and I'll retry.")
         except Exception:
@@ -193,8 +252,9 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
     cfg, sheet, llm, state = cfg_of(ctx), sheet_of(ctx), llm_of(ctx), state_of(ctx)
     await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
+    chat = state.chat(chat_id)
     question = None
-    pending = state.pending
+    pending = chat.pending
     if pending:
         # This batch answers the question we asked: analyze original + answer together.
         question = pending.analysis.clarification_question
@@ -206,8 +266,8 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
     context = pipeline.build_context(now_local(cfg), settings.colleagues, recent, question)
 
     analysis, provider = await llm.analyze(items, context)
-    if pending is state.pending:
-        state.pending = None
+    if pending is chat.pending:
+        chat.pending = None
     analysis, warnings = verify(analysis, settings.colleagues, pipeline.open_row_numbers(rows))
     pipeline.apply_mentions(analysis, items, settings.colleagues)
     log.info("intent=%s entries=%d clarify=%s via %s", analysis.intent, len(analysis.entries),
@@ -224,7 +284,7 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
         return
 
     if analysis.needs_clarification:
-        state.pending = Pending(items=items, analysis=analysis, warnings=warnings, provider=provider)
+        chat.pending = Pending(items=items, analysis=analysis, warnings=warnings, provider=provider)
         text = f"❓ {html.escape(analysis.clarification_question or '')}"
         if analysis.checks:
             text += "\n\n" + pipeline.checks_block(analysis)
@@ -261,7 +321,7 @@ async def save(ctx, chat_id: int, items: list[Item], analysis: Analysis, warning
                 closed[row] = current[row]["Status"]
                 await asyncio.to_thread(sheet.set_status, row, "Done")
 
-    state.last_save = LastSave(rows=new_rows, originals={r: v[-1] for r, v in zip(new_rows, values)}, closed=closed)
+    state.chat(chat_id).last_save = LastSave(rows=new_rows, originals={r: v[-1] for r, v in zip(new_rows, values)}, closed=closed)
     await send(ctx, chat_id, pipeline.saved_reply(analysis, new_rows, list(closed), warnings, provider),
                UNDO_BUTTON)
 
@@ -280,8 +340,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if query.data == "undo":
             await query.edit_message_reply_markup(None)
             await do_undo(ctx, chat_id)
-        elif query.data == "save_draft" and state.pending:
-            p, state.pending = state.pending, None
+        elif query.data == "save_draft" and state.chat(chat_id).pending:
+            chat = state.chat(chat_id)
+            p, chat.pending = chat.pending, None
             await query.edit_message_reply_markup(None)
             if not p.analysis.entries:
                 await send(ctx, chat_id, "There's no draft to save. Please resend with more detail.")
@@ -289,14 +350,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             settings = await asyncio.to_thread(sheet_of(ctx).read_settings)
             await save(ctx, chat_id, p.items, p.analysis, p.warnings, p.provider, settings.auto_close)
         elif query.data == "cancel":
-            state.pending = None
+            state.chat(chat_id).pending = None
             await query.edit_message_reply_markup(None)
             await send(ctx, chat_id, "Okay, dropped it. Nothing was saved.")
 
 
 async def do_undo(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     state, sheet = state_of(ctx), sheet_of(ctx)
-    last = state.last_save
+    chat = state.chat(chat_id)
+    last = chat.last_save
     if not last:
         await send(ctx, chat_id, "Nothing to undo.")
         return
@@ -304,7 +366,7 @@ async def do_undo(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
         await asyncio.to_thread(sheet.set_status, row, status)
     deleted = await asyncio.to_thread(sheet.delete_rows_if_match, last.rows, last.originals)
     await asyncio.to_thread(sheet.write_setting, "last_added_rows", "")
-    state.last_save = None
+    chat.last_save = None
     skipped = len(last.rows) - len(deleted)
     text = f"↩️ Removed {len(deleted)} row(s)."
     if last.closed:
@@ -317,7 +379,8 @@ async def do_undo(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await authorized(update, ctx):
         return
-    await update.effective_message.reply_text(HELP, parse_mode=ParseMode.HTML)
+    text = HELP + (ADMIN_HELP if state_of(ctx).access.is_admin(update.effective_user.id) else "")
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -337,9 +400,9 @@ async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await authorized(update, ctx):
         return
-    state = state_of(ctx)
-    had = state.pending is not None
-    state.pending = None
+    chat = state_of(ctx).chat(update.effective_chat.id)
+    had = chat.pending is not None
+    chat.pending = None
     await update.effective_message.reply_text("Dropped it. Nothing was saved." if had else "Nothing pending.")
 
 
@@ -375,6 +438,69 @@ async def cmd_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    access = state_of(ctx).access
+    role = ("admin" if access.is_admin(user.id) else "owner" if access.is_owner(user.id, user.username)
+            else "user" if access.allowed(user.id, user.username) else "no access")
+    await update.effective_message.reply_text(f"Your Telegram ID: {user.id}\nRole: {role}")
+
+
+async def require_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    if state_of(ctx).access.is_admin(update.effective_user.id):
+        return True
+    await update.effective_message.reply_text("Only the admin can do that.")
+    return False
+
+
+def describe_access(access: acl.Access) -> str:
+    owner = acl.format_people(access.owner) or "not set (summaries go to the admin)"
+    users = acl.format_people(access.users) or "none"
+    admins = ", ".join(map(str, sorted(access.admins))) or "none"
+    return f"<b>Access</b>\nAdmin: {admins}\nOwner: {html.escape(owner)}\nUsers: {html.escape(users)}"
+
+
+async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, ctx):
+        return
+    await send(ctx, update.effective_chat.id, describe_access(state_of(ctx).access))
+
+
+async def _edit_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str, add: bool) -> None:
+    if not await require_admin(update, ctx):
+        return
+    tokens = [t for t in (acl.parse_token(a) for a in ctx.args or []) if t]
+    if not tokens:
+        await update.effective_message.reply_text(f"Usage: /{update.effective_message.text.split()[0][1:]} @username or numeric ID")
+        return
+    access, sheet = state_of(ctx).access, sheet_of(ctx)
+    if key == "owner":
+        new = [tokens]  # one owner (ID and/or @username); replaces the previous one
+    elif add:
+        new = acl.add(access.users, [[t] for t in tokens])
+    else:
+        new = acl.remove(access.users, tokens)
+    await asyncio.to_thread(sheet.write_setting, key, acl.format_people(new))
+    await load_access(ctx)
+    await sync_schedule(ctx, force=True)
+    note = ""
+    if any(not t.isdigit() for t in tokens) and (add or key == "owner"):
+        note = "\nThey need to send the bot any message once so I learn their ID."
+    await send(ctx, update.effective_chat.id, "✅ Saved.\n" + describe_access(state_of(ctx).access) + note)
+
+
+async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _edit_people(update, ctx, "users", add=True)
+
+
+async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _edit_people(update, ctx, "users", add=False)
+
+
+async def cmd_setowner(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _edit_people(update, ctx, "owner", add=True)
+
+
 # ---------------------------------------------------------------- scheduled summaries
 
 async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -385,10 +511,10 @@ async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def sync_schedule(ctx: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
     """(Re)schedule summaries from the Settings tab. Runs every few minutes, so sheet edits apply too."""
     cfg, state = cfg_of(ctx), state_of(ctx)
-    if cfg.allowed_user_id is None:
-        return
     settings = await asyncio.to_thread(sheet_of(ctx).read_settings)
-    key = f"{settings.get('reminder_times')}|{settings.get('reminder_days')}"
+    await load_access(ctx, settings)  # picks up owner/users edited directly in the sheet
+    targets = state.access.summary_chat_ids()
+    key = f"{settings.get('reminder_times')}|{settings.get('reminder_days')}|{targets}"
     if key == state.schedule_key and not force:
         return
     state.schedule_key = key
@@ -396,10 +522,11 @@ async def sync_schedule(ctx: ContextTypes.DEFAULT_TYPE, force: bool = False) -> 
         job.schedule_removal()
     days = digest.parse_days(settings.get("reminder_days"))
     times = digest.parse_times(settings.get("reminder_times"))
-    for t in times:
-        ctx.job_queue.run_daily(digest_job, t.replace(tzinfo=cfg.timezone), days=days,
-                                chat_id=cfg.allowed_user_id, name="digest")
-    log.info("Summaries scheduled at %s on days %s", [t.strftime("%H:%M") for t in times], days)
+    for chat_id in targets:
+        for t in times:
+            ctx.job_queue.run_daily(digest_job, t.replace(tzinfo=cfg.timezone), days=days,
+                                    chat_id=chat_id, name="digest")
+    log.info("Summaries to %s at %s on days %s", targets, [t.strftime("%H:%M") for t in times], days)
 
 
 async def sync_schedule_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,6 +545,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(app: Application) -> None:
     sheet: Sheet = app.bot_data["sheet"]
     await asyncio.to_thread(sheet.ensure_layout)
+    await load_access(app)
     app.job_queue.run_repeating(sync_schedule_job, interval=300, first=1, name="sync-schedule")
     log.info("Bot ready")
 
@@ -448,6 +576,11 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("colleagues", cmd_colleagues))
     app.add_handler(CommandHandler("reminders", cmd_reminders))
+    app.add_handler(CommandHandler("whoami", cmd_whoami))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("adduser", cmd_adduser))
+    app.add_handler(CommandHandler("removeuser", cmd_removeuser))
+    app.add_handler(CommandHandler("setowner", cmd_setowner))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE & ~filters.COMMAND, on_message))
     app.add_error_handler(on_error)
