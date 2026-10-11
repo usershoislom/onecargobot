@@ -2,9 +2,9 @@
 
 Gemini reads text, images, PDFs, audio and video natively in one call, so it
 is the primary engine. If every configured Gemini model is rate-limited or
-down, we fall back to Groq: Whisper transcribes audio, PDFs are converted to
-text locally, and an open-weight model does the analysis. Images can't be
-read on the fallback path, which the owner is told about.
+down, we fall back to Groq: Whisper transcribes audio, PDFs and photos are
+turned into text locally with Tesseract OCR (see ocr.py), and an open-weight
+model does the analysis.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import ValidationError
-from pypdf import PdfReader
 
+from . import ocr
 from .config import PROMPTS_DIR, Config
 from .media import Item
 from .schema import Analysis
@@ -129,6 +129,17 @@ class LLM:
     async def _groq_analyze(self, items: list[Item], context: str, system: str) -> Analysis:
         chunks = [context]
         transcripts = []
+        # The fallback model has a small per-minute token budget, so documents share a fixed char budget.
+        docs = sum(1 for i in items if i.kind in ("pdf", "image")) or 1
+        doc_budget = self.cfg.fallback_doc_chars // docs
+        if ocr.tesseract_available():
+            source = "OCR text"
+            caveat = ("[OCR text, may contain misread characters. Mark values you can't confirm with ? "
+                      "in checks; signatures can't be seen, so don't flag them as missing.]")
+        else:
+            source = "extracted text"
+            caveat = ("[Text layer only: filled-in form values, handwriting and signatures may be missing. "
+                      "Mark anything you can't confirm with ? in checks; don't mark signatures as missing.]")
         for n, item in enumerate(items, 1):
             if item.kind == "text":
                 chunks.append(f"--- item {n} ---\n{item.header}{item.text}")
@@ -137,12 +148,10 @@ class LLM:
                 transcripts.append(text)
                 chunks.append(f"--- item {n}: voice transcript ---\n{item.header}{text}")
             elif item.kind == "pdf":
-                chunks.append(
-                    f"--- item {n}: PDF {item.filename or ''} (extracted text) ---\n{item.header}"
-                    "[Text layer only: filled-in form values, handwriting and signatures may be missing. "
-                    "Mark anything you can't confirm with ? in checks; don't mark signatures as missing.]\n"
-                    f"{pdf_text(item.data)}"
-                )
+                text = await asyncio.to_thread(ocr.document_text, item.data, doc_budget, self.cfg.ocr_max_pages)
+                chunks.append(f"--- item {n}: PDF {item.filename or ''} ({source}) ---\n{item.header}{caveat}\n{text}")
+            elif item.kind == "image" and (text := await asyncio.to_thread(ocr.image_text, item.data)):
+                chunks.append(f"--- item {n}: image ({source}) ---\n{item.header}{caveat}\n{text[:doc_budget]}")
             else:
                 chunks.append(
                     f"--- item {n}: {item.kind} ---\n{item.header}[This {item.kind} cannot be viewed right now. "
@@ -188,15 +197,3 @@ class LLM:
             raise LLMUnavailable(f"Groq transcription {r.status_code}: {r.text[:200]}")
         return r.json().get("text", "").strip()
 
-
-def pdf_text(data: bytes | None, max_chars: int = 20_000) -> str:
-    if not data:
-        return ""
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception as exc:  # malformed PDFs are common; don't crash the batch
-        log.warning("PDF text extraction failed: %s", exc)
-        return "[PDF could not be read]"
-    text = text.strip() or "[PDF has no text layer, probably a scan]"
-    return text[:max_chars]

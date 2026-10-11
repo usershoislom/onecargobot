@@ -52,14 +52,22 @@ HTTPS, or open ports.
 1. In the same Google Cloud project: **Compute Engine → VM instances → Create**.
    - Region: `us-east1`, `us-central1` or `us-west1` (free-tier regions)
    - Machine type: **e2-micro**
-   - Boot disk: Debian 12 or Ubuntu 24.04, **Standard persistent disk**, 30 GB max
-   - Create. (Google asks for a card to verify billing; e2-micro in those
-     regions stays within the free tier. Check the current free-tier terms on
-     Google's site and set a $1 budget alert to be safe.)
+   - Boot disk → **Change**: Debian 12 or Ubuntu 24.04, disk type
+     **Standard persistent disk** (the default "Balanced" is *not* free), 10–30 GB
+   - Networking: keep the default **ephemeral** external IP (don't reserve a static one)
+   - Create.
+
+   > **"It says ~$7/month."** The console shows the list price (e2-micro ≈ $6
+   > plus disk). The free-tier allowance is applied later, on the bill, as long
+   > as the VM is an e2-micro in one of those 3 regions with a standard disk.
+   > To be sure: **Billing → Budgets & alerts → Create budget of $1** with email
+   > alerts, then check **Billing → Reports** after 2–3 days. New accounts also
+   > get $300 credit for 90 days, so the first months cost nothing either way.
+   > If real charges show up, switch to one of the options under "Other hosting options".
 2. Click **SSH** on the VM and run:
 
 ```bash
-sudo apt update && sudo apt install -y python3-venv git
+sudo apt update && sudo apt install -y python3-venv git tesseract-ocr
 sudo useradd -r -m -d /opt/onecargobot onecargo
 sudo -u onecargo git clone https://github.com/usershoislom/onecargobot.git /opt/onecargobot
 cd /opt/onecargobot
@@ -109,7 +117,9 @@ cd /opt/onecargobot && sudo -u onecargo git pull && \
 
 ### Other hosting options
 
-- **Oracle Cloud Always Free**: more generous VM, same steps; sign-up can be picky.
+- **Oracle Cloud Always Free**: genuinely $0 and a more powerful VM (choose an
+  "Always Free eligible" shape). Same steps; sign-up needs a card for verification
+  and can be picky.
 - **Any $4–6/mo VPS** (Hetzner, DigitalOcean): same steps, most reliable.
 - **Your own PC**: `python -m bot.main` works, but reminders stop when it's off.
 

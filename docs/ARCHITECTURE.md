@@ -26,7 +26,8 @@
 |---|---|
 | `bot/main.py` | Telegram handlers, batching, clarify/save/undo flow, scheduled summaries |
 | `bot/media.py` | Converts a Telegram message into items: text, image, PDF, audio, video, text files; forward headers |
-| `bot/llm.py` | Gemini model chain (falls back across models on 429/5xx), Groq fallback (Whisper + text model, PDF text via pypdf) |
+| `bot/llm.py` | Gemini model chain (falls back across models on 429/5xx), Groq fallback (Whisper + text model) |
+| `bot/ocr.py` | Fallback only: free local OCR (Tesseract) for PDFs and photos, picks the most important pages to fit the backup AI's limit |
 | `bot/schema.py` | The JSON structure the AI must return (incl. `doc_type`, `checks`) + the **verification layer** + redaction |
 | `bot/pipeline.py` | Builds the AI context and the Telegram replies |
 | `bot/sheets.py` | Sheet layout, append, cyan highlight, status updates, undo, Settings tab |
@@ -158,7 +159,7 @@ anything is written to the sheet. Phone, load, truck and invoice numbers are kep
 | Provider | What's free | Reads | Role here |
 |---|---|---|---|
 | **Google Gemini API**, Flash / Flash-Lite models | Free tier on `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5/3.1-flash-lite`, `gemini-2.5-flash(-lite)`; Pro models need billing | Text, images, PDF, audio, video in one call; native JSON-schema output | **Primary** |
-| **Groq** | Free plan; Whisper large-v3(-turbo) speech-to-text (~2,000 req/day reported), `openai/gpt-oss-120b`, `llama-3.3-70b-versatile` | Text + audio (via Whisper), no vision on free production models. PDFs go through local text extraction, which misses filled-in form values and handwriting | **Fallback** |
+| **Groq** | Free plan; Whisper large-v3(-turbo) speech-to-text (~2,000 req/day reported), `openai/gpt-oss-120b`, `llama-3.3-70b-versatile` | Text + audio (via Whisper), no vision on free production models, so PDFs and photos are OCR'd locally with Tesseract (free, ~3 s/page). Default `llama-3.3-70b-versatile` (largest free per-minute token budget, ~12K TPM) | **Fallback** |
 | OpenRouter `:free` models | 20 req/min; 50 req/day (1,000/day after a one-time $10 top-up) | Varies by model | Not used (low daily cap); could be added as a 2nd fallback |
 
 Exact free-tier rate limits change often and aren't published per model on

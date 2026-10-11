@@ -429,7 +429,6 @@ def main() -> None:
     cfg = load_config()
     logging.basicConfig(level=cfg.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("pypdf").setLevel(logging.ERROR)
 
     app = (Application.builder().token(cfg.telegram_token)
            .post_init(post_init).post_shutdown(post_shutdown).build())
