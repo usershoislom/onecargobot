@@ -18,6 +18,7 @@ or a mix. It works out what you mean, checks it, and adds rows to your sheet:
 
 **Docs**
 
+- [docs/LOCAL.md](docs/LOCAL.md): run it on your own computer (Windows / macOS), free
 - [docs/DEPLOY.md](docs/DEPLOY.md): step-by-step setup (Telegram, Gemini key, Google Sheet access, free server)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works, sheet layout, free-AI comparison
 - [prompts/extract_system.md](prompts/extract_system.md): the AI instructions (edit to tune behavior)

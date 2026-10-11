@@ -6,3 +6,4 @@ pypdfium2==5.14.0
 pytesseract==0.3.13
 pillow==12.3.0
 pydantic==2.14.0
+tzdata==2026.1

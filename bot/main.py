@@ -11,6 +11,7 @@ from datetime import datetime
 import gspread
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -537,6 +538,9 @@ async def sync_schedule_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(ctx.error, NetworkError):  # brief internet/Telegram hiccup; the bot retries on its own
+        log.warning("Network problem, retrying: %s", ctx.error)
+        return
     log.error("Unhandled error", exc_info=ctx.error)
 
 
@@ -563,6 +567,13 @@ def main() -> None:
            .post_init(post_init).post_shutdown(post_shutdown).build())
     try:
         sheet = Sheet(cfg.google_credentials_file, cfg.spreadsheet_id, cfg.timezone.key)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Google key file not found: {cfg.google_credentials_file}") from exc
+    except (ValueError, KeyError) as exc:
+        raise SystemExit(
+            f"{cfg.google_credentials_file} isn't a valid service-account key ({exc.__class__.__name__}). "
+            "Download a fresh JSON key: Google Cloud → IAM → Service accounts → Keys → Add key → JSON."
+        ) from exc
     except (gspread.exceptions.SpreadsheetNotFound, gspread.exceptions.APIError) as exc:
         raise SystemExit(
             f"Can't open the Google Sheet ({exc}). Share it as Editor with the service account email "
