@@ -7,7 +7,7 @@ or a mix. It works out what you mean, checks it, and adds rows to your sheet:
 
 **Date · Company · Driver Name · Amount · Action · Deadline · Assigned To · Problem · Status (Note / Follow-up / Action / Done)**
 
-- The newest rows are highlighted **cyan**.
+- The newest rows are highlighted in **light yellow**; status cells are color-coded.
 - When something is unclear, it **asks you** before saving.
 - When you report something finished, it logs a new Done row and closes the
   matching open item.

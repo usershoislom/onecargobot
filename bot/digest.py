@@ -62,25 +62,37 @@ def is_overdue(r: LogRow, now: datetime) -> bool:
     return due < now if has_time(r["Deadline"]) else due.date() < now.date()
 
 
-def build_digest(rows: list[LogRow], now: datetime) -> str:
-    """now must be naive local (Eastern) time."""
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
-    overdue, due_today, due_tomorrow, no_deadline = [], [], [], []
-
+def categorize(rows: list[LogRow], now: datetime) -> dict[str, list[LogRow]]:
+    """Sort open items by urgency. Every open item lands in exactly one bucket;
+    'logged_today' holds today's notes and done items (nothing to chase)."""
+    today, tomorrow = now.date(), now.date() + timedelta(days=1)
+    buckets: dict[str, list] = {k: [] for k in ("overdue", "today", "tomorrow", "upcoming", "no_deadline")}
+    logged_today: list[LogRow] = []
     for r in rows:
-        if r["Status"] == "Done":
+        if r["Status"] in ("Done", "Note"):
+            added = parse_deadline(r["Date"])
+            if added and added.date() == today:
+                logged_today.append(r)
             continue
         due = parse_deadline(r["Deadline"])
         if due is None:
-            if r["Status"] in ("Action", "Follow-up"):
-                no_deadline.append(r)
+            buckets["no_deadline"].append((datetime.max, r))
         elif is_overdue(r, now):
-            overdue.append((due, r))
+            buckets["overdue"].append((due, r))
         elif due.date() == today:
-            due_today.append((due, r))
+            buckets["today"].append((due, r))
         elif due.date() == tomorrow:
-            due_tomorrow.append((due, r))
+            buckets["tomorrow"].append((due, r))
+        else:
+            buckets["upcoming"].append((due, r))
+    out = {k: [r for _, r in sorted(v, key=lambda p: (p[0], p[1].row))] for k, v in buckets.items()}
+    out["logged_today"] = logged_today
+    return out
+
+
+def build_digest(rows: list[LogRow], now: datetime) -> str:
+    """now must be naive local (Eastern) time."""
+    c = categorize(rows, now)
 
     def section(title: str, items: list, show_due: bool) -> list[str]:
         if not items:
@@ -91,14 +103,47 @@ def build_digest(rows: list[LogRow], now: datetime) -> str:
             out.append(f"…and {len(items) - MAX_PER_SECTION} more in the sheet")
         return out
 
-    def by_due(pairs):
-        return [r for _, r in sorted(pairs, key=lambda p: p[0])]
-
     lines = [f"<b>📋 Follow-ups for {now.strftime('%A, %m/%d/%Y %I:%M %p')}</b>"]
-    lines += section("🔴 <b>Overdue</b>", by_due(overdue), True)
-    lines += section("🟠 <b>Due today</b>", by_due(due_today), True)
-    lines += section("🟡 <b>Due tomorrow</b>", by_due(due_tomorrow), True)
-    lines += section("📌 <b>Open, no deadline</b>", no_deadline, False)
+    lines += section("🔴 <b>Overdue</b>", c["overdue"], True)
+    lines += section("🟠 <b>Due today</b>", c["today"], True)
+    lines += section("🟡 <b>Due tomorrow</b>", c["tomorrow"], True)
+    lines += section("📌 <b>Open, no deadline</b>", c["no_deadline"], False)
     if len(lines) == 1:
-        lines.append("\nNothing open. You're all caught up ✅")
+        lines.append("\nNothing urgent. You're all caught up ✅")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- "Today" tab
+
+TODAY_COLUMNS = ["Row", "Deadline", "Status", "Action", "Driver Name", "Company", "Amount", "Assigned To", "Problem"]
+TODAY_SECTIONS = [  # key, title, background color (hex)
+    ("overdue", "OVERDUE", "#F4C7C3"),
+    ("today", "DUE TODAY", "#FCE8B2"),
+    ("tomorrow", "DUE TOMORROW", "#FFF4C2"),
+    ("upcoming", "UPCOMING", "#E1ECFD"),
+    ("no_deadline", "OPEN, NO DEADLINE", "#EEEEEE"),
+    ("logged_today", "NOTES & DONE TODAY", "#DFF3E4"),
+]
+
+
+def today_grid(rows: list[LogRow], now: datetime) -> tuple[list[list], list[tuple[int, str]]]:
+    """Values for the Today tab plus (row index, color) of each section header row (0-based)."""
+    c = categorize(rows, now)
+    grid: list[list] = [
+        [f"Follow-ups for {now.strftime('%A, %m/%d/%Y')}  ·  updated {now.strftime('%I:%M %p').lstrip('0')}"],
+        TODAY_COLUMNS,
+    ]
+    headers: list[tuple[int, str]] = []
+    for key, title, color in TODAY_SECTIONS:
+        items = c[key]
+        if not items:
+            continue
+        grid.append([""])
+        headers.append((len(grid), color))
+        grid.append([f"{title} ({len(items)})"])
+        for r in items:
+            grid.append([r.row, r["Deadline"], r["Status"], r["Action"], r["Driver Name"], r["Company"],
+                         r["Amount"], r["Assigned To"], r["Problem"]])
+    if not headers:
+        grid += [[""], ["Nothing open. All caught up ✅"]]
+    return grid, headers

@@ -1,4 +1,4 @@
-"""Google Sheets access: layout setup, appending rows, cyan highlight, undo, settings."""
+"""Google Sheets access: layout setup, appending rows, highlight of new rows, undo, settings, Today tab."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import gspread
-from gspread.utils import ValueInputOption, ValueRenderOption
+from gspread.utils import InsertDataOption, ValueInputOption, ValueRenderOption
 
 from .schema import STATUSES, Colleague, Entry, redact
 
@@ -26,8 +26,28 @@ COL = {name: i for i, name in enumerate(HEADERS)}  # 0-based
 LAST_COL = "J"
 STATUS_COL = "I"
 
-CYAN = {"red": 0.0, "green": 1.0, "blue": 1.0}
-WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
+# Bump when the Log formatting changes; the bot re-applies it on the next start.
+LAYOUT_VERSION = "2"
+
+
+def rgb(hex_color: str) -> dict:
+    h = hex_color.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
+
+
+WHITE = rgb("#FFFFFF")
+TEXT = rgb("#202124")          # near-black body text
+HEADER_BG = rgb("#1F3A5F")     # dark navy header, white text
+NEW_ROW_BG = rgb("#FFF4C2")    # soft yellow: rows from the latest message
+STATUS_COLORS = {              # (background, text) for the Status cell
+    "Action": ("#FDE2E1", "#A50E0E"),
+    "Follow-up": ("#E1ECFD", "#174EA6"),
+    "Note": ("#EEEEEE", "#5F6368"),
+    "Done": ("#DFF3E4", "#137333"),
+}
+OVERDUE_BG, DUE_TODAY_BG = rgb("#F4C7C3"), rgb("#FCE8B2")
+# Default first tab names in various Google Sheets languages (removed if left empty).
+DEFAULT_TAB_NAME = re.compile(r"^(Sheet|Лист|Hoja|Feuille|Tabelle|Foglio|Planilha|Arkusz|Sayfa)\s?\d+$")
 
 DEFAULT_SETTINGS = [
     ("reminder_times", "09:00, 16:00", "Daily summary times (24h, US Eastern). Comma-separated, any number of times."),
@@ -35,11 +55,13 @@ DEFAULT_SETTINGS = [
     ("auto_close_rows", "TRUE", "When you report something done, also set the matching open row to Done."),
     ("owner", "", "Owner's Telegram ID or @username. Gets the daily summaries. Set with /setowner."),
     ("users", "", "Other people allowed to use the bot (IDs or @usernames). Set with /adduser."),
-    ("last_added_rows", "", "Managed by the bot (rows currently highlighted cyan). Don't edit."),
+    ("last_added_rows", "", "Managed by the bot (rows currently highlighted). Don't edit."),
+    ("layout_version", "", "Managed by the bot. Don't edit."),
 ]
 # Colleagues table on the Settings tab: E = name, F = Telegram @username, G = role.
 COLLEAGUE_HEADERS = ["Colleague Name", "Telegram @username", "Role (e.g. Accounting, Safety)"]
 COLLEAGUES_COL = "E"
+TODAY_WIDTHS = [55, 150, 95, 240, 140, 160, 90, 150, 380]  # matches digest.TODAY_COLUMNS
 
 
 @dataclass
@@ -125,6 +147,7 @@ class Sheet:
         self.timezone = timezone
         self.log_ws: gspread.Worksheet | None = None
         self.settings_ws: gspread.Worksheet | None = None
+        self.today_ws: gspread.Worksheet | None = None
 
     # ------------------------------------------------------------ setup
 
@@ -148,25 +171,49 @@ class Sheet:
                 self.log_ws.update_title(LOG_TAB)
             else:
                 self.log_ws = self.ss.add_worksheet(LOG_TAB, rows=1000, cols=len(HEADERS), index=0)
-        if self.log_ws.row_values(1) != HEADERS:
+        new_log = self.log_ws.row_values(1) != HEADERS
+        if new_log:
             self.log_ws.update([HEADERS], "A1")
-            self._format_log()
 
         if SETTINGS_TAB in titles:
             self.settings_ws = titles[SETTINGS_TAB]
         else:
-            self.settings_ws = self.ss.add_worksheet(SETTINGS_TAB, rows=100, cols=6)
+            self.settings_ws = self.ss.add_worksheet(SETTINGS_TAB, rows=100, cols=8)
         self._ensure_settings()
 
-        if TODAY_TAB not in titles:
-            today = self.ss.add_worksheet(TODAY_TAB, rows=500, cols=len(HEADERS), index=1)
-            self._format_today(today)
+        settings = self.read_settings()
+        if new_log or settings.get("layout_version") != LAYOUT_VERSION:
+            self._format_log()
+            # Re-highlight the latest rows (the reset above cleared all row colors).
+            self.highlight(setting_to_rows(settings.get("last_added_rows")), [])
+            self.write_setting("layout_version", LAYOUT_VERSION)
+
+        if TODAY_TAB in titles:
+            self.today_ws = titles[TODAY_TAB]
+        else:
+            self.today_ws = self.ss.add_worksheet(TODAY_TAB, rows=300, cols=len(TODAY_WIDTHS), index=1)
+        self._format_today_columns()
+
+        # Remove an empty default tab ("Sheet1" / "Лист1") so only the bot's tabs remain.
+        for title, ws in titles.items():
+            if DEFAULT_TAB_NAME.match(title) and ws.id != self.log_ws.id and not ws.get_all_values():
+                self.ss.del_worksheet(ws)
 
     def _format_log(self) -> None:
+        """Header, column formats, status colors, deadline warnings. Also repairs data rows
+        (dark text, no fill) so earlier formatting mistakes can't hide data."""
         ws = self.log_ws
         sid = ws.id
+        meta = self.ss.fetch_sheet_metadata(params={"fields": "sheets(properties(sheetId),conditionalFormats)"})
+        old_rules = next((len(sh.get("conditionalFormats", [])) for sh in meta.get("sheets", [])
+                          if sh["properties"]["sheetId"] == sid), 0)
         widths = [95, 160, 140, 95, 240, 150, 130, 360, 100, 360]
-        requests = [
+
+        def cols(name: str) -> dict:
+            return {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL[name], "endColumnIndex": COL[name] + 1}
+
+        requests = [{"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}} for _ in range(old_rules)]
+        requests += [
             {"updateSheetProperties": {
                 "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
                 "fields": "gridProperties.frozenRowCount"}},
@@ -174,28 +221,36 @@ class Sheet:
                 "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
                 "cell": {"userEnteredFormat": {
                     "textFormat": {"bold": True, "foregroundColor": WHITE},
-                    "backgroundColor": {"red": 0.15, "green": 0.25, "blue": 0.4}}},
-                "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
+                    "backgroundColor": HEADER_BG, "verticalAlignment": "MIDDLE"}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)"}},
+            # All data rows: dark regular text on white.
             {"repeatCell": {
-                "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Amount"], "endColumnIndex": COL["Amount"] + 1},
+                "range": {"sheetId": sid, "startRowIndex": 1},
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": False, "foregroundColor": TEXT},
+                                               "backgroundColor": WHITE, "verticalAlignment": "TOP"}},
+                "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)"}},
+            {"repeatCell": {
+                "range": cols("Amount"),
                 "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
                 "fields": "userEnteredFormat.numberFormat"}},
             {"repeatCell": {
-                "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Date"], "endColumnIndex": COL["Date"] + 1},
+                "range": cols("Date"),
                 "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE", "pattern": "mm/dd/yyyy"}}},
                 "fields": "userEnteredFormat.numberFormat"}},
             {"repeatCell": {
                 "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Problem"], "endColumnIndex": len(HEADERS)},
-                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
-                "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)"}},
+                "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
+                "fields": "userEnteredFormat.wrapStrategy"}},
             {"setDataValidation": {
-                "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Status"], "endColumnIndex": COL["Status"] + 1},
+                "range": cols("Status"),
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": s} for s in STATUSES]},
                          "showCustomUi": True, "strict": True}}},
             # Deadline cell: red when overdue, amber when due today (ignored once Done).
-            self._deadline_rule(sid, 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)<TODAY())', {"red": 0.96, "green": 0.73, "blue": 0.73}),
-            self._deadline_rule(sid, 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)=TODAY())', {"red": 1.0, "green": 0.87, "blue": 0.6}),
+            self._rule(cols("Deadline"), 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)<TODAY())', OVERDUE_BG, rgb("#A50E0E")),
+            self._rule(cols("Deadline"), 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)=TODAY())', DUE_TODAY_BG, None),
         ]
+        for status, (bg, fg) in STATUS_COLORS.items():
+            requests.append(self._rule(cols("Status"), f'$I2="{status}"', rgb(bg), rgb(fg)))
         for i, w in enumerate(widths):
             requests.append({"updateDimensionProperties": {
                 "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
@@ -203,35 +258,51 @@ class Sheet:
         self.ss.batch_update({"requests": requests})
 
     @staticmethod
-    def _deadline_rule(sid: int, formula: str, color: dict) -> dict:
+    def _rule(rng: dict, formula: str, bg: dict, fg: dict | None) -> dict:
+        fmt: dict = {"backgroundColor": bg}
+        if fg:
+            fmt["textFormat"] = {"foregroundColor": fg, "bold": True}
         return {"addConditionalFormatRule": {"index": 0, "rule": {
-            "ranges": [{"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Deadline"], "endColumnIndex": COL["Deadline"] + 1}],
+            "ranges": [rng],
             "booleanRule": {"condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": "=" + formula}]},
-                            "format": {"backgroundColor": color}}}}}
+                            "format": fmt}}}}
 
-    def _format_today(self, ws: gspread.Worksheet) -> None:
-        ws.update([HEADERS], "A1")
-        formula = (
-            f'=IFERROR(SORT(FILTER({LOG_TAB}!A2:{LAST_COL}, {LOG_TAB}!I2:I<>"Done", '
-            f'ISNUMBER({LOG_TAB}!F2:F), INT({LOG_TAB}!F2:F)<=TODAY()), 6, TRUE), "Nothing due today")'
-        )
-        ws.update([[formula]], "A2", value_input_option=ValueInputOption.user_entered)
-        self.ss.batch_update({"requests": [
-            {"updateSheetProperties": {"properties": {"sheetId": ws.id, "gridProperties": {"frozenRowCount": 1}},
+    def _format_today_columns(self) -> None:
+        sid = self.today_ws.id
+        requests = [{"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+            "properties": {"pixelSize": w}, "fields": "pixelSize"}} for i, w in enumerate(TODAY_WIDTHS)]
+        self.ss.batch_update({"requests": requests})
+
+    def write_today(self, grid: list[list], section_rows: list[tuple[int, str]]) -> None:
+        """Replace the Today tab with a freshly built follow-up list."""
+        ws, sid = self.today_ws, self.today_ws.id
+        width = len(TODAY_WIDTHS)
+        if ws.row_count < len(grid) + 5:
+            ws.add_rows(len(grid) + 50 - ws.row_count)
+        ws.clear()
+        ws.update([r + [""] * (width - len(r)) for r in grid], "A1", value_input_option=ValueInputOption.raw)
+
+        def row_fmt(i: int, fmt: dict, fields: str) -> dict:
+            return {"repeatCell": {"range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
+                                             "startColumnIndex": 0, "endColumnIndex": width},
+                                   "cell": {"userEnteredFormat": fmt}, "fields": f"userEnteredFormat({fields})"}}
+
+        requests = [
+            {"repeatCell": {"range": {"sheetId": sid},
+                            "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": TEXT},
+                                                           "backgroundColor": WHITE, "wrapStrategy": "WRAP",
+                                                           "verticalAlignment": "TOP"}},
+                            "fields": "userEnteredFormat"}},
+            {"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 2}},
                                        "fields": "gridProperties.frozenRowCount"}},
-            {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1},
-                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                            "fields": "userEnteredFormat.textFormat"}},
-            {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": COL["Amount"], "endColumnIndex": COL["Amount"] + 1},
-                            "cell": {"userEnteredFormat": {"numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}}},
-                            "fields": "userEnteredFormat.numberFormat"}},
-            {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": COL["Date"], "endColumnIndex": COL["Date"] + 1},
-                            "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE", "pattern": "mm/dd/yyyy"}}},
-                            "fields": "userEnteredFormat.numberFormat"}},
-            {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": COL["Deadline"], "endColumnIndex": COL["Deadline"] + 1},
-                            "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE_TIME", "pattern": "mm/dd/yyyy h:mm AM/PM"}}},
-                            "fields": "userEnteredFormat.numberFormat"}},
-        ]})
+            row_fmt(0, {"textFormat": {"bold": True, "fontSize": 13, "foregroundColor": TEXT}}, "textFormat"),
+            row_fmt(1, {"textFormat": {"bold": True, "foregroundColor": WHITE}, "backgroundColor": HEADER_BG},
+                    "textFormat,backgroundColor"),
+        ]
+        requests += [row_fmt(i, {"textFormat": {"bold": True, "foregroundColor": TEXT}, "backgroundColor": rgb(color)},
+                             "textFormat,backgroundColor") for i, color in section_rows]
+        self.ss.batch_update({"requests": requests})
 
     def _ensure_settings(self) -> None:
         ws = self.settings_ws
@@ -274,25 +345,29 @@ class Sheet:
         return rows
 
     def append(self, rows: list[list]) -> list[int]:
+        # OVERWRITE fills the next empty rows. INSERT_ROWS would copy the formatting of the
+        # row above, which made the first data row inherit the header's white text.
         resp = self.log_ws.append_rows(
             rows, value_input_option=ValueInputOption.user_entered,
-            insert_data_option="INSERT_ROWS", table_range="A1",
+            insert_data_option=InsertDataOption.overwrite, table_range="A1",
         )
         return parse_row_range(resp.get("updates", {}).get("updatedRange", ""))
 
     def highlight(self, new_rows: list[int], previous_rows: list[int]) -> None:
-        """Paint the newest rows cyan and return the previous batch to white."""
+        """Paint the newest rows soft yellow and return the previous batch to white.
+        Text color is always set too, so a row can never end up unreadable."""
         sid = self.log_ws.id
 
         def paint(row: int, color: dict) -> dict:
             return {"repeatCell": {
                 "range": {"sheetId": sid, "startRowIndex": row - 1, "endRowIndex": row,
                           "startColumnIndex": 0, "endColumnIndex": len(HEADERS)},
-                "cell": {"userEnteredFormat": {"backgroundColor": color}},
-                "fields": "userEnteredFormat.backgroundColor"}}
+                "cell": {"userEnteredFormat": {"backgroundColor": color,
+                                               "textFormat": {"bold": False, "foregroundColor": TEXT}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}}
 
         requests = [paint(r, WHITE) for r in previous_rows if r not in new_rows and r > 1]
-        requests += [paint(r, CYAN) for r in new_rows]
+        requests += [paint(r, NEW_ROW_BG) for r in new_rows if r > 1]
         if requests:
             self.ss.batch_update({"requests": requests})
 

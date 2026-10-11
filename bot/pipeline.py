@@ -125,7 +125,7 @@ def saved_reply(analysis: Analysis, row_numbers: list[int], closed: list[int],
     entries = analysis.entries
     if row_numbers:
         span = f"row {row_numbers[0]}" if len(row_numbers) == 1 else f"rows {row_numbers[0]}–{row_numbers[-1]}"
-        head = f"✅ Added {len(entries)} {'entry' if len(entries) == 1 else 'entries'} ({span}, highlighted cyan)"
+        head = f"✅ Added {len(entries)} {'entry' if len(entries) == 1 else 'entries'} ({span}, highlighted in the sheet)"
     else:
         head = "✅ Saved"
     head += f"\n📄 {DOC_LABELS.get(analysis.doc_type, 'Note')}"

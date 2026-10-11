@@ -191,3 +191,28 @@ def test_apply_mentions_adds_every_tagged_person():
     assert a.entries[0].assigned_to == "Anna Cruz, @kate_acc, Sam Lee"
     assert a.entries[1].assigned_to is None  # notes aren't assigned
     assert pipeline.mentions(items) == ["@anna_acc", "@kate_acc", "@sam_safety"]
+
+
+def test_today_grid_sections_each_open_item_once():
+    rows = [
+        row(2, Action="Late", Deadline="10/10/2026"),
+        row(3, Action="Today", Deadline="10/12/2026 03:00 PM"),
+        row(4, Action="Tomorrow", Deadline="10/13/2026"),
+        row(5, Action="Later", Deadline="10/20/2026"),
+        row(6, Action="No date", Status="Follow-up"),
+        row(7, Action="Note today", Status="Note", Date="10/12/2026"),
+        row(8, Action="Old note", Status="Note", Date="10/01/2026"),
+        row(9, Action="Done today", Status="Done", Date="10/12/2026"),
+    ]
+    grid, headers = digest.today_grid(rows, NOW)
+    titles = [grid[i][0] for i, _ in headers]
+    assert titles == ["OVERDUE (1)", "DUE TODAY (1)", "DUE TOMORROW (1)", "UPCOMING (1)",
+                      "OPEN, NO DEADLINE (1)", "NOTES & DONE TODAY (2)"]
+    listed = [r[0] for r in grid if r and isinstance(r[0], int)]
+    assert listed == [2, 3, 4, 5, 6, 7, 9]  # each once, old note left out
+    assert grid[1] == digest.TODAY_COLUMNS
+
+
+def test_today_grid_empty():
+    grid, headers = digest.today_grid([], NOW)
+    assert headers == [] and "All caught up" in grid[-1][0]

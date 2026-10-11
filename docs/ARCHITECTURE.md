@@ -14,7 +14,7 @@
                                   5. Verify in code: dates, amounts, status, names,
                                      row refs, mask bank/SSN numbers
                                   6a. unclear? ──► ask you a question ──► your answer re-enters step 3
-                                  6b. clear ──► append rows, paint cyan ────────────►  Sheet: Log
+                                  6b. clear ──► append rows, highlight new ones ─────►  Sheet: Log
                                                 mark closed rows Done
  ◄── summary + Undo button        7. Reply
  ◄── 9 AM / 4 PM summaries        8. Scheduler reads Log, builds summary (no AI)    ◄── Sheet: Log
@@ -30,7 +30,7 @@
 | `bot/ocr.py` | Fallback only: free local OCR (Tesseract) for PDFs and photos, picks the most important pages to fit the backup AI's limit |
 | `bot/schema.py` | The JSON structure the AI must return (incl. `doc_type`, `checks`) + the **verification layer** + redaction |
 | `bot/pipeline.py` | Builds the AI context and the Telegram replies |
-| `bot/sheets.py` | Sheet layout, append, cyan highlight, status updates, undo, Settings tab |
+| `bot/sheets.py` | Sheet layout, append, new-row highlight, status updates, undo, Settings and Today tabs |
 | `bot/digest.py` | Daily follow-up summary and schedule parsing |
 | `prompts/extract_system.md` | **Main system prompt**: how to understand and classify messages |
 | `prompts/playbooks.md` | **Per-type playbooks**: what to extract, what to check, which rows to create for each message type |
@@ -54,10 +54,10 @@ without a restart.
 - Assigned To dropdown comes from the colleague names you type in **Settings → column E**.
 - **Original Message** keeps what you sent (plus the voice transcript and file
   descriptions), so you can always check the bot's interpretation.
-- The rows from the most recent message are **cyan**; the previous batch goes back to white.
+- The rows from the most recent message are **light yellow**; the previous batch goes back to white. Status cells are colored: Action red, Follow-up blue, Note gray, Done green.
 - Deadline cell turns **red** when overdue and **amber** when due today (until Done).
 
-**Today**: a live formula view of every open item due today or overdue, sorted by deadline.
+**Today**: rebuilt by the bot after every message, with each summary and every 5 minutes. Open items grouped as Overdue → Due today → Due tomorrow → Upcoming → Open, no deadline, plus today's notes and done items. Each line shows its Log row number. Don't edit it by hand; edit the Log tab.
 
 **Settings**: editable by you, re-read every 5 minutes:
 
@@ -68,7 +68,7 @@ without a restart.
 | auto_close_rows | `TRUE` | When you report "paid John $500", also flip the matching open row to Done |
 | owner | (empty) | Owner's Telegram ID and/or @username. Gets the daily summaries. Set with `/setowner` |
 | users | (empty) | Other people allowed to use the bot, comma-separated. Set with `/adduser` / `/removeuser` |
-| last_added_rows | (bot-managed) | Which rows are cyan right now |
+| last_added_rows | (bot-managed) | Which rows are highlighted right now |
 
 Colleagues table on the same tab: **E** name, **F** Telegram @username, **G** role.
 When you @mention people in a caption (`@anna_acc @sam_safety`), the bot
@@ -114,7 +114,7 @@ Each playbook says what to extract, what to **check**, and which rows to
 create. Checks come back with the reply:
 
 ```
-✅ Added 2 entries (rows 14–15, highlighted cyan)
+✅ Added 2 entries (rows 14–15, highlighted in the sheet)
 📄 Driver contract
 1. Action · Update pay rates in payroll · John Carter · ABC Trucking LLC → Anna, Sam
 2. Follow-up · Get carrier signature on contract · John Carter · ABC Trucking LLC

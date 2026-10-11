@@ -32,7 +32,7 @@ from .sheets import Sheet, entry_to_row, rows_to_setting, setting_to_rows
 log = logging.getLogger("onecargobot")
 
 HELP = """<b>OneCargo notes bot</b>
-Send me anything: text, voice notes, photos, PDFs, forwarded messages, or a mix. I read it, work out what you mean, and add rows to your Google Sheet. The newest rows are highlighted cyan.
+Send me anything: text, voice notes, photos, PDFs, forwarded messages, or a mix. I read it, work out what you mean, and add rows to your Google Sheet. The newest rows are highlighted in light yellow.
 
 If something is unclear I'll ask before saving.
 
@@ -85,6 +85,7 @@ class State:
     access: acl.Access = field(default_factory=acl.Access)
     chats: dict[int, ChatState] = field(default_factory=dict)
     schedule_key: str = ""
+    today_key: str = ""  # last content written to the Today tab
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one sheet writer at a time
 
     def chat(self, chat_id: int) -> ChatState:
@@ -200,6 +201,27 @@ CLARIFY_BUTTONS = InlineKeyboardMarkup([[
     InlineKeyboardButton("💾 Save draft anyway", callback_data="save_draft"),
     InlineKeyboardButton("✖️ Cancel", callback_data="cancel"),
 ]])
+
+
+async def refresh_today(ctx: ContextTypes.DEFAULT_TYPE, rows=None) -> None:
+    """Rebuild the Today tab if its content changed (cheap to call often)."""
+    sheet, state = sheet_of(ctx), state_of(ctx)
+    if rows is None:
+        rows = await asyncio.to_thread(sheet.read_rows)
+    now = now_local(cfg_of(ctx))
+    grid, sections = digest.today_grid(rows, now)
+    key = repr((now.date(), grid[1:]))  # ignore the "updated at" line
+    if key == state.today_key:
+        return
+    await asyncio.to_thread(sheet.write_today, grid, sections)
+    state.today_key = key
+
+
+async def refresh_today_safely(ctx: ContextTypes.DEFAULT_TYPE, rows=None) -> None:
+    try:
+        await refresh_today(ctx, rows)
+    except Exception:
+        log.exception("Couldn't update the Today tab")
 
 
 # ---------------------------------------------------------------- message intake
@@ -322,6 +344,7 @@ async def save(ctx, chat_id: int, items: list[Item], analysis: Analysis, warning
                 closed[row] = current[row]["Status"]
                 await asyncio.to_thread(sheet.set_status, row, "Done")
 
+    await refresh_today_safely(ctx)
     state.chat(chat_id).last_save = LastSave(rows=new_rows, originals={r: v[-1] for r, v in zip(new_rows, values)}, closed=closed)
     await send(ctx, chat_id, pipeline.saved_reply(analysis, new_rows, list(closed), warnings, provider),
                UNDO_BUTTON)
@@ -368,6 +391,7 @@ async def do_undo(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     deleted = await asyncio.to_thread(sheet.delete_rows_if_match, last.rows, last.originals)
     await asyncio.to_thread(sheet.write_setting, "last_added_rows", "")
     chat.last_save = None
+    await refresh_today_safely(ctx)
     skipped = len(last.rows) - len(deleted)
     text = f"↩️ Removed {len(deleted)} row(s)."
     if last.closed:
@@ -389,6 +413,7 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     rows = await asyncio.to_thread(sheet_of(ctx).read_rows)
     await send(ctx, update.effective_chat.id, digest.build_digest(rows, now_local(cfg_of(ctx))))
+    await refresh_today_safely(ctx, rows)
 
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -507,6 +532,7 @@ async def cmd_setowner(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def digest_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     rows = await asyncio.to_thread(sheet_of(ctx).read_rows)
     await send(ctx, ctx.job.chat_id, digest.build_digest(rows, now_local(cfg_of(ctx))))
+    await refresh_today_safely(ctx, rows)
 
 
 async def sync_schedule(ctx: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
@@ -535,6 +561,7 @@ async def sync_schedule_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await sync_schedule(ctx)
     except Exception:
         log.exception("Couldn't refresh schedule from Settings")
+    await refresh_today_safely(ctx)  # also picks up edits made directly in the Log tab
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
