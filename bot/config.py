@@ -40,7 +40,7 @@ class Config:
     groq_whisper_model: str
     timezone: ZoneInfo
     batch_window_seconds: float
-    open_rows_context_limit: int = 150
+    recent_rows_context_limit: int = 300
     log_level: str = "INFO"
 
 
@@ -66,6 +66,6 @@ def load_config() -> Config:
         groq_whisper_model=os.environ.get("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
         timezone=ZoneInfo(os.environ.get("TIMEZONE", "America/New_York")),
         batch_window_seconds=float(os.environ.get("BATCH_WINDOW_SECONDS", "4")),
-        open_rows_context_limit=int(os.environ.get("OPEN_ROWS_CONTEXT_LIMIT", "150")),
+        recent_rows_context_limit=int(os.environ.get("RECENT_ROWS_CONTEXT_LIMIT", "300")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

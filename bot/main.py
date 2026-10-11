@@ -202,13 +202,13 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
 
     settings = await asyncio.to_thread(sheet.read_settings)
     rows = await asyncio.to_thread(sheet.read_rows)
-    open_rows = pipeline.open_rows(rows, cfg.open_rows_context_limit)
-    context = pipeline.build_context(now_local(cfg), settings.colleagues, open_rows, question)
+    recent = rows[-cfg.recent_rows_context_limit:]
+    context = pipeline.build_context(now_local(cfg), settings.colleagues, recent, question)
 
     analysis, provider = await llm.analyze(items, context)
     if pending is state.pending:
         state.pending = None
-    analysis, warnings = verify(analysis, settings.colleagues, {r.row for r in open_rows})
+    analysis, warnings = verify(analysis, settings.colleagues, pipeline.open_row_numbers(rows))
     log.info("intent=%s entries=%d clarify=%s via %s", analysis.intent, len(analysis.entries),
              analysis.needs_clarification, provider)
 
@@ -225,6 +225,8 @@ async def process_batch(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, items: lis
     if analysis.needs_clarification:
         state.pending = Pending(items=items, analysis=analysis, warnings=warnings, provider=provider)
         text = f"❓ {html.escape(analysis.clarification_question or '')}"
+        if analysis.checks:
+            text += "\n\n" + pipeline.checks_block(analysis)
         if analysis.entries:
             text += "\n\n<i>My draft so far:</i>\n" + pipeline.describe_entries(analysis.entries)
         text += "\n\nReply with the answer (text or voice), or use the buttons."
@@ -259,7 +261,7 @@ async def save(ctx, chat_id: int, items: list[Item], analysis: Analysis, warning
                 await asyncio.to_thread(sheet.set_status, row, "Done")
 
     state.last_save = LastSave(rows=new_rows, originals={r: v[-1] for r, v in zip(new_rows, values)}, closed=closed)
-    await send(ctx, chat_id, pipeline.saved_reply(analysis.entries, new_rows, list(closed), warnings, provider),
+    await send(ctx, chat_id, pipeline.saved_reply(analysis, new_rows, list(closed), warnings, provider),
                UNDO_BUTTON)
 
 
@@ -344,9 +346,10 @@ async def cmd_colleagues(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not await authorized(update, ctx):
         return
     settings = await asyncio.to_thread(sheet_of(ctx).read_settings)
-    names = "\n".join(f"• {html.escape(n)}" for n in settings.colleagues) or "(none yet)"
+    names = "\n".join(f"• {html.escape(c.describe())}" for c in settings.colleagues) or "(none yet)"
     await send(ctx, update.effective_chat.id,
-               f"<b>Colleagues</b>\n{names}\n\nAdd or remove names in the <b>Settings</b> tab, column E.")
+               f"<b>Colleagues</b>\n{names}\n\nEdit them in the <b>Settings</b> tab: "
+               "column E = name, F = Telegram @username, G = role.")
 
 
 async def cmd_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -426,6 +429,7 @@ def main() -> None:
     cfg = load_config()
     logging.basicConfig(level=cfg.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
 
     app = (Application.builder().token(cfg.telegram_token)
            .post_init(post_init).post_shutdown(post_shutdown).build())

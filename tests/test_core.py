@@ -3,8 +3,8 @@ from datetime import datetime, time
 from bot import digest, pipeline
 from bot.main import split_message
 from bot.media import Item
-from bot.schema import Analysis, Entry, match_colleague, parse_deadline, verify
-from bot.sheets import LogRow, entry_to_row, parse_row_range, safe_text, setting_to_rows
+from bot.schema import Analysis, Colleague, Entry, match_colleague, match_colleagues, parse_deadline, redact, verify
+from bot.sheets import LogRow, entry_to_row, parse_row_range, parse_settings, safe_text, setting_to_rows
 
 NOW = datetime(2026, 10, 12, 10, 30)  # Monday
 
@@ -33,12 +33,30 @@ def test_parse_deadline_formats():
 
 
 def test_match_colleague():
-    team = ["Bob Miller", "Sara Khan", "Bobby Ray"]
+    team = [Colleague("Bob Miller", "bob_acc"), Colleague("Sara Khan"), Colleague("Bobby Ray")]
     assert match_colleague("sara", team) == "Sara Khan"
     assert match_colleague("Bob Miller", team) == "Bob Miller"
     assert match_colleague("bob", team) == "Bob Miller"
     assert match_colleague("me", team) is None
     assert match_colleague("Jim", team) == "Jim"
+    assert match_colleague("@Bob_ACC", team) == "Bob Miller"
+
+
+def test_match_colleagues_from_mentions():
+    team = [Colleague("Anna Cruz", "anna_acc", "Accounting"), Colleague("Sam Lee", "sam_safety", "Safety"),
+            Colleague("Tom")]
+    got = match_colleagues("@anna_acc @kate_acc, Tom @sam_safety, @ANNA_acc", team)
+    assert got == "Anna Cruz, @kate_acc, Tom, Sam Lee"
+
+
+def test_redact_sensitive_numbers():
+    text = "Bank of America checking, Routing Number: 111000025 Account Number: 1234 5678 9012, SSN 123-45-6789"
+    out = redact(text)
+    assert "111000025" not in out and "123456789012" not in out.replace(" ", "")
+    assert "****0025" in out and "****9012" in out and "SSN ****6789" in out
+    assert redact("his number is 123-45-6789") == "his number is ***-**-****"
+    # phone, load and money stay untouched
+    assert redact("Load #12345678, call 5551234567, $1,250") == "Load #12345678, call 5551234567, $1,250"
 
 
 def test_verify_normalizes_and_drops_bad_rows():
@@ -47,7 +65,7 @@ def test_verify_normalizes_and_drops_bad_rows():
               assigned_to="sara", amount=185.004),
         Entry(action="Call", problem="p", status="Follow-up", deadline="whenever"),
     ])
-    a, warnings = verify(a, ["Sara Khan"], open_rows={5, 6})
+    a, warnings = verify(a, [Colleague("Sara Khan")], open_rows={5, 6})
     e1, e2 = a.entries
     assert e1.action == "Reimburse lumper"
     assert e1.deadline == "10/15/2026 02:00 PM"
@@ -64,6 +82,17 @@ def test_verify_asks_when_action_missing():
 
 
 # ---------------------------------------------------------------- sheets helpers
+
+def test_parse_settings_colleagues():
+    grid = [["Setting", "Value", "Notes", "", "Colleague Name", "Telegram @username", "Role"],
+            ["reminder_times", "09:00, 16:00", "", "", "Anna Cruz", "@anna_acc", "Accounting"],
+            ["auto_close_rows", "TRUE", "", "", "Sam Lee", "sam_safety"],
+            ["", "", "", "", "Tom"]]
+    st = parse_settings(grid)
+    assert st.get("reminder_times") == "09:00, 16:00" and st.auto_close
+    assert st.colleagues == [Colleague("Anna Cruz", "anna_acc", "Accounting"),
+                             Colleague("Sam Lee", "sam_safety"), Colleague("Tom")]
+
 
 def test_safe_text_blocks_formulas():
     assert safe_text("+1 555 123") == "'+1 555 123"
@@ -122,8 +151,10 @@ def test_build_digest_empty():
 # ---------------------------------------------------------------- pipeline
 
 def test_build_context_includes_open_rows_and_question():
-    ctx = pipeline.build_context(NOW, ["Bob"], [row(4, Company="ABC", Amount="$10.00")], question="Which John?")
+    ctx = pipeline.build_context(NOW, [Colleague("Bob", "bob_acc", "Accounting")],
+                                 [row(4, Company="ABC", Amount="$10.00")], question="Which John?")
     assert "Monday, 10/12/2026" in ctx
+    assert "Bob (@bob_acc, Accounting)" in ctx
     assert "4 | ABC |  | $10.00 | Do thing |  | Action" in ctx
     assert "EARLIER QUESTION YOU ASKED: Which John?" in ctx
 
@@ -131,12 +162,14 @@ def test_build_context_includes_open_rows_and_question():
 def test_build_original_and_reply():
     items = [Item(kind="text", header="[Forwarded from Mike] ", text="lumper 185"),
              Item(kind="image", data=b"x", mime="image/jpeg")]
-    a = Analysis(intent="log", transcript=None, source_notes="Lumper receipt $185")
+    a = Analysis(intent="log", doc_type="receipt_expense", transcript=None, source_notes="Lumper receipt $185",
+                 checks=["✓ Amount matches caption"])
     orig = pipeline.build_original(items, a)
-    assert orig == "[Forwarded from Mike] lumper 185\n[image]\nFiles: Lumper receipt $185"
-    e = Entry(action="Reimburse <lumper>", problem="p", status="Action", amount=185)
-    reply = pipeline.saved_reply([e], [14], [9], ["check"], "groq:x")
+    assert orig == "[Receipt / expense]\n[Forwarded from Mike] lumper 185\n[image]\nFiles: Lumper receipt $185"
+    a.entries = [Entry(action="Reimburse <lumper>", problem="p", status="Action", amount=185)]
+    reply = pipeline.saved_reply(a, [14], [9], ["check"], "groq:x")
     assert "row 14" in reply and "&lt;lumper&gt;" in reply and "row 9 as Done" in reply and "backup AI" in reply
+    assert "Receipt / expense" in reply and "✓ Amount matches caption" in reply
 
 
 def test_split_message_keeps_lines():

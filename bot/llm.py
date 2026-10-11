@@ -9,6 +9,7 @@ read on the fallback path, which the owner is told about.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -28,6 +29,8 @@ log = logging.getLogger(__name__)
 
 GROQ_BASE = "https://api.groq.com/openai/v1"
 RETRYABLE_CODES = {404, 429, 500, 502, 503, 504}
+# Larger files go through Gemini's Files API instead of inline bytes (request size limit).
+INLINE_LIMIT_BYTES = 14 * 1024 * 1024
 
 
 class LLMUnavailable(RuntimeError):
@@ -48,14 +51,14 @@ class LLM:
 
     async def analyze(self, items: list[Item], context: str) -> tuple[Analysis, str]:
         """Return (analysis, provider label)."""
-        system = load_prompt("extract_system.md")
+        system = load_prompt("extract_system.md") + "\n\n" + load_prompt("playbooks.md")
         parts: list[types.Part] = [types.Part.from_text(text=context)]
         for n, item in enumerate(items, 1):
             if item.kind == "text":
                 parts.append(types.Part.from_text(text=f"--- item {n} ---\n{item.header}{item.text}"))
             else:
                 parts.append(types.Part.from_text(text=f"--- item {n}: {item.kind} {item.filename or ''} ---\n{item.header}"))
-                parts.append(types.Part.from_bytes(data=item.data, mime_type=item.mime))
+                parts.append(await self._file_part(item))
 
         config = types.GenerateContentConfig(
             system_instruction=system,
@@ -89,6 +92,19 @@ class LLM:
 
     # ------------------------------------------------------------ gemini
 
+    async def _file_part(self, item: Item) -> types.Part:
+        if len(item.data or b"") <= INLINE_LIMIT_BYTES:
+            return types.Part.from_bytes(data=item.data, mime_type=item.mime)
+        uploaded = await self.gemini.aio.files.upload(
+            file=io.BytesIO(item.data), config=types.UploadFileConfig(mime_type=item.mime)
+        )
+        for _ in range(30):  # video needs processing time; PDFs/audio are usually ready at once
+            if uploaded.state is None or uploaded.state.name != "PROCESSING":
+                break
+            await asyncio.sleep(2)
+            uploaded = await self.gemini.aio.files.get(name=uploaded.name)
+        return types.Part.from_uri(file_uri=uploaded.uri, mime_type=item.mime)
+
     async def _gemini(self, parts: list[types.Part], config: types.GenerateContentConfig):
         last_error: Exception | None = None
         for model in self.cfg.gemini_models:
@@ -121,7 +137,12 @@ class LLM:
                 transcripts.append(text)
                 chunks.append(f"--- item {n}: voice transcript ---\n{item.header}{text}")
             elif item.kind == "pdf":
-                chunks.append(f"--- item {n}: PDF {item.filename or ''} (extracted text) ---\n{item.header}{pdf_text(item.data)}")
+                chunks.append(
+                    f"--- item {n}: PDF {item.filename or ''} (extracted text) ---\n{item.header}"
+                    "[Text layer only: filled-in form values, handwriting and signatures may be missing. "
+                    "Mark anything you can't confirm with ? in checks; don't mark signatures as missing.]\n"
+                    f"{pdf_text(item.data)}"
+                )
             else:
                 chunks.append(
                     f"--- item {n}: {item.kind} ---\n{item.header}[This {item.kind} cannot be viewed right now. "

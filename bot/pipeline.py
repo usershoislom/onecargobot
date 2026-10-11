@@ -8,23 +8,33 @@ import io
 from datetime import datetime
 
 from .media import Item
-from .schema import Analysis, Entry
+from .schema import Analysis, Colleague, Entry
 from .sheets import HEADERS, LogRow
 
 
-def open_rows(rows: list[LogRow], limit: int) -> list[LogRow]:
-    return [r for r in rows if r["Status"] != "Done"][-limit:]
+DOC_LABELS = {
+    "driver_contract": "Driver contract", "pay_rate_change": "Pay rate change", "direct_deposit": "Direct deposit",
+    "onboarding_docs": "Onboarding docs", "termination": "Termination", "rate_confirmation": "Rate confirmation",
+    "invoice": "Invoice", "settlement": "Settlement", "receipt_expense": "Receipt / expense", "bol_pod": "BOL / POD",
+    "inspection_violation": "Inspection / violation", "accident_damage": "Accident / damage",
+    "repair_maintenance": "Repair / maintenance", "load_issue": "Load issue", "payroll_payment": "Payroll / payment",
+    "general_note": "Note",
+}
 
 
-def build_context(now: datetime, colleagues: list[str], open_rows_: list[LogRow],
+def open_row_numbers(rows: list[LogRow]) -> set[int]:
+    return {r.row for r in rows if r["Status"] != "Done"}
+
+
+def build_context(now: datetime, colleagues: list[Colleague], recent_rows: list[LogRow],
                   question: str | None = None) -> str:
     lines = [
         f"NOW: {now.strftime('%A, %m/%d/%Y %I:%M %p')} (US Eastern)",
-        f"COLLEAGUES: {', '.join(colleagues) if colleagues else '(none listed)'}",
-        "OPEN ROWS:",
+        "COLLEAGUES: " + ("; ".join(c.describe() for c in colleagues) if colleagues else "(none listed)"),
+        "RECENT ROWS (row | company | driver | amount | action | deadline | status):",
     ]
-    if open_rows_:
-        for r in open_rows_:
+    if recent_rows:
+        for r in recent_rows:
             lines.append(" | ".join([str(r.row), r["Company"], r["Driver Name"], r["Amount"],
                                      r["Action"], r["Deadline"], r["Status"]]))
     else:
@@ -41,7 +51,7 @@ def build_context(now: datetime, colleagues: list[str], open_rows_: list[LogRow]
 
 def build_original(items: list[Item], analysis: Analysis) -> str:
     """Text for the 'Original Message' column so the owner can verify each row."""
-    parts = [i.describe() for i in items]
+    parts = [f"[{DOC_LABELS.get(analysis.doc_type, 'Note')}]"] + [i.describe() for i in items]
     if analysis.transcript:
         parts.append(f"Transcript: {analysis.transcript}")
     if analysis.source_notes:
@@ -79,14 +89,24 @@ def describe_entries(entries: list[Entry]) -> str:
     return "\n".join(f"{n}. {describe_entry(e)}" for n, e in enumerate(entries, 1))
 
 
-def saved_reply(entries: list[Entry], row_numbers: list[int], closed: list[int],
+def checks_block(analysis: Analysis) -> str:
+    if not analysis.checks:
+        return ""
+    return "🔎 <b>Checks</b>\n" + "\n".join(f"• {html.escape(c)}" for c in analysis.checks)
+
+
+def saved_reply(analysis: Analysis, row_numbers: list[int], closed: list[int],
                 warnings: list[str], provider: str) -> str:
+    entries = analysis.entries
     if row_numbers:
         span = f"row {row_numbers[0]}" if len(row_numbers) == 1 else f"rows {row_numbers[0]}–{row_numbers[-1]}"
         head = f"✅ Added {len(entries)} {'entry' if len(entries) == 1 else 'entries'} ({span}, highlighted cyan)"
     else:
         head = "✅ Saved"
+    head += f"\n📄 {DOC_LABELS.get(analysis.doc_type, 'Note')}"
     out = [head, describe_entries(entries)]
+    if analysis.checks:
+        out.append(checks_block(analysis))
     if closed:
         out.append("☑️ Also marked " + ", ".join(f"row {r}" for r in closed) + " as Done")
     out += [f"⚠️ {html.escape(w)}" for w in warnings]

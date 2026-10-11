@@ -35,6 +35,9 @@ The bot signs in as a **service account** (a robot Google user).
    (looks like `onecargobot@your-project.iam.gserviceaccount.com`).
 6. Open your sheet → **Share** → paste that email → **Editor** → Send.
 
+> Keep `service_account.json` private: it's a password for that robot account.
+> Never paste it into a chat or commit it to GitHub (it's in `.gitignore`).
+
 On first start the bot builds the layout itself: **Log**, **Today** and
 **Settings** tabs, headers, dropdowns, and colors. It reuses the empty
 default tab if it's the only one.
@@ -110,7 +113,23 @@ cd /opt/onecargobot && sudo -u onecargo git pull && \
 - **Any $4–6/mo VPS** (Hetzner, DigitalOcean): same steps, most reliable.
 - **Your own PC**: `python -m bot.main` works, but reminders stop when it's off.
 
-## 5. Run locally (for testing)
+## 5. Fill in your colleagues
+
+In the sheet's **Settings** tab, list everyone you tag: column E name,
+F Telegram @username, G role (Accounting, Safety…).
+
+## 6. Try the AI without Telegram
+
+Only needs `GEMINI_API_KEY` in `.env`; nothing is written to the sheet:
+
+```bash
+.venv/bin/python -m bot.try_cli contract.pdf --caption "New updated contract deal for ... @anna_acc" \
+  --colleagues "Anna:@anna_acc:Accounting, Sam:@sam_safety:Safety"
+```
+
+Use it to tune `prompts/*.md` until the output looks right.
+
+## 7. Run locally (for testing)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate

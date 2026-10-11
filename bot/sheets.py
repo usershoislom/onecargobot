@@ -10,7 +10,7 @@ from datetime import datetime
 import gspread
 from gspread.utils import ValueInputOption, ValueRenderOption
 
-from .schema import STATUSES, Entry
+from .schema import STATUSES, Colleague, Entry, redact
 
 log = logging.getLogger(__name__)
 
@@ -35,14 +35,15 @@ DEFAULT_SETTINGS = [
     ("auto_close_rows", "TRUE", "When you report something done, also set the matching open row to Done."),
     ("last_added_rows", "", "Managed by the bot (rows currently highlighted cyan). Don't edit."),
 ]
-COLLEAGUES_HEADER = "Colleagues"
+# Colleagues table on the Settings tab: E = name, F = Telegram @username, G = role.
+COLLEAGUE_HEADERS = ["Colleague Name", "Telegram @username", "Role (e.g. Accounting, Safety)"]
 COLLEAGUES_COL = "E"
 
 
 @dataclass
 class Settings:
     values: dict[str, str] = field(default_factory=dict)
-    colleagues: list[str] = field(default_factory=list)
+    colleagues: list[Colleague] = field(default_factory=list)
 
     def get(self, key: str, default: str = "") -> str:
         return self.values.get(key, default)
@@ -80,7 +81,7 @@ def entry_to_row(entry: Entry, logged_on: datetime, original: str) -> list:
         safe_text(entry.assigned_to),
         safe_text(entry.problem),
         entry.status,
-        safe_text(original[:45000]),  # Sheets cell limit is 50k chars
+        safe_text(redact(original)[:45000]),  # Sheets cell limit is 50k chars
     ]
 
 
@@ -100,6 +101,19 @@ def rows_to_setting(rows: list[int]) -> str:
 
 def setting_to_rows(value: str) -> list[int]:
     return [int(v) for v in re.findall(r"\d+", value or "")]
+
+
+def parse_settings(grid: list[list[str]]) -> Settings:
+    values: dict[str, str] = {}
+    colleagues: list[Colleague] = []
+    c = ord(COLLEAGUES_COL) - ord("A")
+    for r in grid[1:]:
+        r = r + [""] * (c + 3 - len(r))
+        if r[0].strip():
+            values[r[0].strip()] = r[1].strip()
+        if r[c].strip():
+            colleagues.append(Colleague(name=r[c].strip(), username=r[c + 1].strip().lstrip("@"), role=r[c + 2].strip()))
+    return Settings(values=values, colleagues=colleagues)
 
 
 class Sheet:
@@ -176,11 +190,6 @@ class Sheet:
                 "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Status"], "endColumnIndex": COL["Status"] + 1},
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": s} for s in STATUSES]},
                          "showCustomUi": True, "strict": True}}},
-            {"setDataValidation": {
-                "range": {"sheetId": sid, "startRowIndex": 1, "startColumnIndex": COL["Assigned To"], "endColumnIndex": COL["Assigned To"] + 1},
-                "rule": {"condition": {"type": "ONE_OF_RANGE", "values": [
-                    {"userEnteredValue": f"={SETTINGS_TAB}!${COLLEAGUES_COL}$2:${COLLEAGUES_COL}"}]},
-                    "showCustomUi": True, "strict": False}}},
             # Deadline cell: red when overdue, amber when due today (ignored once Done).
             self._deadline_rule(sid, 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)<TODAY())', {"red": 0.96, "green": 0.73, "blue": 0.73}),
             self._deadline_rule(sid, 'AND(ISNUMBER($F2),$I2<>"Done",INT($F2)=TODAY())', {"red": 1.0, "green": 0.87, "blue": 0.6}),
@@ -227,9 +236,11 @@ class Sheet:
         grid = ws.get_all_values()
         existing = {r[0].strip() for r in grid[1:] if r and r[0].strip()}
         if not grid or not grid[0] or grid[0][0] != "Setting":
-            ws.update([["Setting", "Value", "Notes", "", COLLEAGUES_HEADER]], "A1")
-            ws.format("A1:E1", {"textFormat": {"bold": True}})
+            ws.update([["Setting", "Value", "Notes"]], "A1")
             existing = set()
+        if not grid or len(grid[0]) < 5 or grid[0][4] != COLLEAGUE_HEADERS[0]:
+            ws.update([COLLEAGUE_HEADERS], f"{COLLEAGUES_COL}1")
+        ws.format("A1:G1", {"textFormat": {"bold": True}})
         missing = [list(row) for row in DEFAULT_SETTINGS if row[0] not in existing]
         if missing:
             start = max(len([r for r in grid if r and r[0].strip()]), 1) + 1
@@ -239,15 +250,7 @@ class Sheet:
 
     def read_settings(self) -> Settings:
         grid = self.settings_ws.get_all_values()
-        values = {}
-        colleagues = []
-        col_idx = ord(COLLEAGUES_COL) - ord("A")
-        for r in grid[1:]:
-            if len(r) >= 2 and r[0].strip():
-                values[r[0].strip()] = r[1].strip()
-            if len(r) > col_idx and r[col_idx].strip():
-                colleagues.append(r[col_idx].strip())
-        return Settings(values=values, colleagues=colleagues)
+        return parse_settings(grid)
 
     def write_setting(self, key: str, value: str) -> None:
         cell = self.settings_ws.find(key, in_column=1)
